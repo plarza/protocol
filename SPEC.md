@@ -16,7 +16,7 @@ This document specifies how accounts work across aza: one account that signs in 
 Each of these is specified in detail later; this is just enough to read the rest in order.
 
 - An **identity** is one account: a person, a bot or an organisation.
-- An identity is stored as a **change log**: a list of signed **changes** (adding a device, setting the profile and so on) that anyone can read to learn its current state.
+- An identity is stored as a **change log**: a list of signed **changes** (adding a device, setting the home node and so on) that anyone can read to learn its current state.
 - A **device** is a key that controls an identity. It lives in the aza app on a phone or computer, or in a password-protected backup file.
 - The **master** is one special device per identity. It can't be signed out or removed, it alone can remove other devices for good, and it can hand its role to a new key that it committed to in advance.
 - The **aza app** is aza's own app that holds devices and approves sign-ins.
@@ -27,6 +27,7 @@ Each of these is specified in detail later; this is just enough to read the rest
 - **Sync data** is an app's data, encrypted and stored on a node so its clients can share it.
 - **Public records** are an app's data that anyone can read, signed so it provably comes from the identity, such as posts.
 - An identity's **inbox** is where others leave sealed messages for its devices and clients.
+- An identity's **profile** is what others see, such as its display name and picture. It is kept outside the change log.
 - **Proof of work** is a computing cost paid once when an identity is created, to make mass-creating identities expensive.
 
 ## 3. Cryptography and encoding
@@ -70,7 +71,7 @@ A device is **current** from when it is added until it is signed out or removed 
 
 ## 5. Identity
 
-An identity is stored as a **change log**: a list of **changes**, each signed by one of its devices. Reading the log tells you everything about the identity: its devices, its master, its profile and so on.
+An identity is stored as a **change log**: a list of **changes**, each signed by one of its devices. Reading the log tells you everything about the identity's security: its devices, its master, its home node and so on.
 
 ### 5.1 Changes
 
@@ -114,10 +115,10 @@ A **device ID** names one device: the hash of the change that brought it in. For
 |---|---|---|---|
 | `genesis` | `key`, `enc`, `next`, `counter`, `check` | the master it creates | creates the identity. `next` is the fingerprint of the next key; `check` is for the first data secret (section 9). |
 | `add-device` | `key`, `enc`, `label` | any device | adds an ordinary device. Not allowed if `key` has been used by any master or device or its fingerprint is any master's `next`, or if the identity would then have more than 64 ordinary devices that haven't been removed. |
-| `sign-out` | `device` (device ID) | any device | signs out a current ordinary device other than the signer itself |
-| `remove-device` | `device` (device ID), `keep` (change hash, optional) | the master only | removes an ordinary device for good. `device` must be the device ID of an `add-device` change among this change's ancestors. `keep`, if given, must be a change signed by `device` and an ancestor of this change. |
-| `set-master` | `reveal`, `key`, `enc`, `next` | the next key named by the current master's `next`, revealed in `reveal` | hands the master role to the fresh keys `key` and `enc`, and commits to a new `next`. `key` must not be the key of any master or device among its ancestors. |
-| `set-profile` | `name`, `picture`, `handle` | any device | replaces the profile (section 6) |
+| `sign-out` | `device` (device ID), `endorse` (optional) | any device | signs out a current ordinary device other than the signer itself. `endorse` keeps records alive (section 10). |
+| `remove-device` | `device` (device ID), `keep` (change hash, optional), `endorse` (optional) | the master only | removes an ordinary device for good. `device` must be the device ID of an `add-device` change among this change's ancestors. `keep`, if given, must be a change signed by `device` and an ancestor of this change. |
+| `set-master` | `reveal`, `key`, `enc`, `next`, `endorse` (optional) | the next key named by the current master's `next`, revealed in `reveal` | hands the master role to the fresh keys `key` and `enc`, and commits to a new `next`. `key` must not be the key of any master or device among its ancestors. |
+| `set-handle` | `handle` (optional) | any device | sets or clears the handle (section 6) |
 | `set-home` | `node` (URL) | any device | sets the home node (section 11) |
 | `revoke-client` | `client` (fingerprint) | any device | revokes a client (section 7) |
 | `new-secret` | `check` | the master only | announces a new data secret (section 9) |
@@ -126,7 +127,7 @@ A **device ID** names one device: the hash of the change that brought it in. For
 
 ### 5.4 Reading the log
 
-Two devices can sign changes without knowing about each other. For example, aiden's phone is on a plane and adds a device while aiden's laptop updates the profile. Both changes list the same change in `prev`. Two changes are **concurrent** when neither is an ancestor of the other.
+Two devices can sign changes without knowing about each other. For example, aiden's phone is on a plane and adds a device while aiden's laptop sets the handle. Both changes list the same change in `prev`. Two changes are **concurrent** when neither is an ancestor of the other.
 
 A log is read in five steps. Each step only uses the results of the steps before it.
 
@@ -157,7 +158,7 @@ Judging on their own means two devices that sign each other out at the same mome
 3. its body follows the rules in section 5.3;
 4. it is an ancestor of every sign-out of `by`.
 
-When several changes set the same thing, such as two `set-profile`s, the last one applied wins.
+When several changes set the same thing, such as two `set-handle`s, the last one applied wins.
 
 **What this means in practice.**
 
@@ -173,21 +174,39 @@ When several changes set the same thing, such as two `set-profile`s, the last on
 
 The aza app downloads the newest log from the home node before signing any change, so that it doesn't throw away legitimate changes it simply hadn't seen yet.
 
-## 6. Profile
+## 6. Handle and profile
 
-The **profile** is what other people see. It has three fields, all set by `set-profile`:
-
-- **`name`**: the display name. Any text up to 64 characters. Not unique: anyone can be "aiden".
-- **`picture`**: an `https` URL of an image, up to 2048 characters.
-- **`handle`**: optional. A domain the identity owns.
-
-A **handle** is a [registrable domain](https://en.wikipedia.org/wiki/Public_Suffix_List): the part of a domain you can buy, like `sidny.me` or `example.com.au`, but never a subdomain like `blog.sidny.me`. To prove it, the owner adds this DNS record, with the identity ID written as 64 lowercase hex characters:
+**Handle.** A **handle** is a [registrable domain](https://en.wikipedia.org/wiki/Public_Suffix_List) the identity owns: the part of a domain you can buy, like `sidny.me` or `example.com.au`, but never a subdomain like `blog.sidny.me`. It is set in the change log with `set-handle`, because it is how people find and recognise the identity. To prove it, the owner adds this DNS record, with the identity ID written as 64 lowercase hex characters:
 
 ```
 _aza.sidny.me  TXT  "aza=<identity ID> node=<home node URL>"
 ```
 
-An app shows a handle only after looking up that record through a public [DNS-over-HTTPS](https://en.wikipedia.org/wiki/DNS_over_HTTPS) resolver and finding the identity's ID in it. Otherwise it shows the display name only. The `node=` part lets someone who only knows the handle find the change log. When the identity moves to another home node, the aza app reminds the owner to update the record.
+An app shows a handle only after looking up that record through a public [DNS-over-HTTPS](https://en.wikipedia.org/wiki/DNS_over_HTTPS) resolver and finding the identity's ID in it. The `node=` part lets someone who only knows the handle find the change log. When the identity moves to another home node, the aza app reminds the owner to update the record.
+
+**Profile.** Everything else people see is a **profile record**, kept outside the change log so that adding a field never touches security or needs a new protocol version. It is signed directly by one of the identity's devices and stored on the home node; no app or domain is involved.
+
+```json
+{
+  "identity": "9f2c…",
+  "version": 4,
+  "fields": {
+    "name": "aiden",
+    "picture": { "hash": "…", "type": "image/webp", "size": 48210 },
+    "plarza.com/location": "Sydney"
+  },
+  "by": "c87a…",
+  "sig": "…"
+}
+```
+
+`fields` is an open map, and the whole record is at most 16 KiB. A few **well-known fields** are defined here; any other field's name starts with the domain of whoever defines it, like `plarza.com/location`, and readers ignore fields they don't know.
+
+- **`name`**: the display name. Any text up to 64 characters. Not unique: anyone can be "aiden".
+- **`picture`**: the SHA-256 hash, type (`image/png`, `image/jpeg`, `image/webp` or `image/avif`) and size of an image of at most 256 KiB, stored as a **blob** on the home node. Any node may keep a copy and serve it by its hash. A reader checks the hash, size and type, so the picture can't be swapped, and only the node it fetches from sees the request.
+- **`contact`**: the identity's contact secret (section 10), for people who want anyone to be able to message them. Publishing it also lets anyone find out which messaging apps the identity uses, by trying app IDs.
+
+A node keeps the newest profile record from each device, and a reader uses the one with the highest `version` among those signed by a device current at the end of the log. Each new record's `version` must be higher than any the node holds. If the device that signed the record readers are using stops being current, the aza app signs a new version with another device, starting from the newest record signed by a device that is still current, or asks the person if that looks wrong. A thief's profile edits therefore disappear once the thief's device is signed out.
 
 ## 7. Apps, clients and certificates
 
@@ -195,7 +214,7 @@ An **app** is a service, named by a domain it controls: `heavier.aza.network`, `
 
 A **client** is one piece of software acting for an identity inside one app. The iPhone and Mac versions of a messenger are two clients of one app. Each client makes its own signing key pair, the **client key**, and, if it will read sync data, its own encryption key pair. Clients never see device keys.
 
-A client gets permission through a **certificate**: a statement signed by a device, which the client keeps. It is not published in the change log, so the log doesn't reveal which apps an identity uses. The home node does see certificates, and public records and key packages show their apps to anyone (section 10).
+A client gets permission through a **certificate**: a statement signed by a device, which the client keeps. It is not published in the change log, so the log doesn't reveal which apps an identity uses. The home node does see certificates, and public records show their app to anyone (section 10).
 
 ```json
 {
@@ -221,7 +240,7 @@ A client gets permission through a **certificate**: a statement signed by a devi
 | `read` | reading this identity's sync data for this app (section 9) |
 | `write` | storing sync data for this app. A certificate with `write` must also have `read`, because a client needs the app key to encrypt. |
 | `publish` | publishing public records for this app (section 10) |
-| `receive` | publishing key packages and reading inbox items for this app (section 10). Needs the client's encryption key. |
+| `receive` | publishing key packages and reading inbox items for this app, under its contact tag (section 10). Needs the client's encryption key. |
 
 **Getting a certificate.** The client makes a **request** holding its app ID, client key, encryption key (if asking for `read` or `receive`), the scopes it wants, and a **return URL**. The return URL must be an `https` URL whose host is exactly the app ID. The aza app refuses any request whose return URL isn't, because the return URL is how the aza app knows the certificate can only reach the real app:
 
@@ -275,7 +294,7 @@ Backup files are a lot to ask of most people. A **provider**, which can be any n
 
 To the protocol a hosted master is an ordinary master, so nothing in the log shows that an identity is hosted. The provider also gets the master's envelope of the data secret (section 9), so it can read the identity's private data and restore it if every device is lost. The provider can do anything a master can, so a hosted identity is only as safe as its provider.
 
-**Taking control.** Whenever the person wants, the aza app makes new master keys and a next key for them and asks the provider to hand off: the provider signs one `set-master` that reveals its next key and brings in the person's new master key, with `next` set to the fingerprint of the person's next key. Before accepting the handoff, the aza app checks that its `key` and `next` are the ones it sent and that every master change is among its ancestors, so the provider can't quietly undo earlier repairs; otherwise it refuses. It then lists every current device, and the new master removes any the person doesn't recognise, for example one the provider added, before the data secret is replaced. The identity ID never changes, so handle, followers and conversations carry over, and so do app approvals signed by the person's devices. Approvals the provider's master had signed stop working; the aza app lists them, and the person chooses which to approve again. The provider's master stops being current, and the aza app replaces the data secret (section 9), so the provider can't read anything written afterwards. A provider that secretly kept its old next key could still sign a competing handoff and leave the identity without a master (section 5.4), but it can never take the identity back.
+**Taking control.** Whenever the person wants, the aza app makes new master keys and a next key for them and asks the provider to hand off: the provider signs one `set-master` that reveals its next key and brings in the person's new master key, with `next` set to the fingerprint of the person's next key. Before accepting the handoff, the aza app checks that its `key`, `next` and `endorse` are the ones it sent and that every master change is among its ancestors, so the provider can't quietly undo earlier repairs; otherwise it refuses. It then lists every current device, and the new master removes any the person doesn't recognise, for example one the provider added, before the data secret is replaced. The identity ID never changes, so handle, followers and conversations carry over, and so do app approvals signed by the person's devices. Approvals the provider's master had signed stop working; the aza app lists them, and the person chooses which to approve again. The provider's master stops being current, and the aza app replaces the data secret (section 9), so the provider can't read anything written afterwards. A provider that secretly kept its old next key could still sign a competing handoff and leave the identity without a master (section 5.4), but it can never take the identity back.
 
 ## 9. Private data
 
@@ -288,6 +307,7 @@ Sync data is encrypted so that only the identity's devices and the clients it al
 ```json
 {
   "identity": "9f2c…",
+  "kind": "data-secret",
   "secret": "<name of the data secret>",
   "holder": "<device ID or client key fingerprint>",
   "sealed": "…",
@@ -296,7 +316,7 @@ Sync data is encrypted so that only the identity's devices and the clients it al
 }
 ```
 
-The aza app writes an envelope of the data secret for each current device, including the master, and an envelope of the app key for each client whose certificate has `read`. A reader only uses an envelope signed by a device that is current at the end of the log, and checks the opened secret against its `check`. So a node or a signed-out device can't slip in a secret of its own. When a device stops being current, including a master after a handoff, the aza app makes new envelopes, from secrets it holds itself, to replace every envelope that device had signed, and only for secrets announced by applied changes. Readers may open envelopes for any secret announced by a `new-secret` change that was applied (section 5.4), so items not yet moved to the current secret stay readable. A new device or client gets its envelope from the home node and opens it with its own private encryption key. The backup file doesn't need the data secret, because the master's envelope is on the home node.
+`kind` is `data-secret`, `app-key` or `contact-tag`. For the first two, `secret` names the data secret; for a contact tag it is the hash of the contact secret it was derived from (section 10). The aza app writes an envelope of the data secret for each current device, including the master, an envelope of the app key for each client whose certificate has `read`, and an envelope of the app's contact tag for each client whose certificate has `receive`. A reader only uses an envelope signed by a device that is current at the end of the log, and checks an opened data secret against its `check`. So a node or a signed-out device can't slip in a secret of its own. When a device stops being current, including a master after a handoff, the aza app makes new envelopes, from secrets it holds itself, to replace every envelope that device had signed, and only for secrets announced by applied changes and contact tags derived from the current contact secret. Readers may open envelopes for any secret announced by a `new-secret` change that was applied (section 5.4), so items not yet moved to the current secret stay readable. A new device or client gets its envelope from the home node and opens it with its own private encryption key. The backup file doesn't need the data secret, because the master's envelope is on the home node.
 
 **Sync data.** Each item is encrypted with its app's key using AES-256-GCM:
 
@@ -334,29 +354,45 @@ These two pieces let apps such as social networks and messengers build on aza id
 }
 ```
 
-It is signed by a client key and carries that client's certificate; devices don't publish records themselves. Anyone accepts it if the signature is valid for the certificate's client key, the certificate's signature is valid, its signing device is current, its client isn't revoked, its `app` equals the record's `app`, and its scopes include `publish`. Because the certificate travels with the record, publishing reveals that the identity uses that app; that's the point of publishing. A record is valid only while its certificate is. Signing out a device therefore hides every record published through clients it approved, until the app re-publishes them, each with the next `version`, through a client whose certificate works. `name` and `version` follow the same rules as sync data (section 9). Public records are stored on the home node, and a `publish` client can delete them.
+It is signed by a client key and carries that client's certificate; devices don't publish records themselves. Anyone accepts it if the signature is valid for the certificate's client key, the certificate's signature is valid, its signing device is current, its client isn't revoked, its `app` equals the record's `app`, and its scopes include `publish`. Because the certificate travels with the record, publishing reveals that the identity uses that app; that's the point of publishing.
 
-**Inbox.** Anyone can leave an **inbox item** for one of an identity's devices or `receive` clients:
+`name` and `version` follow the same rules as sync data (section 9), and readers take the highest valid `version` of each `name`. Public records are stored on the home node, and a `publish` client can delete them.
+
+**Endorsements.** Normally a record is valid only while its certificate is, and a certificate stops working when the device that signed it is signed out or removed, or when that master hands off. So that this doesn't hide every post made through the apps that device approved, the change that ends it (`sign-out`, `remove-device` or `set-master`) can carry an **endorsement**: `endorse` is the root of a [Merkle tree](https://en.wikipedia.org/wiki/Merkle_tree), built as in RFC 9162 section 2.1. Its leaves are the hashes of the records the person still trusts, each hashed without its `endorsed` field, sorted, with duplicates removed; the aza app includes only the newest version of each `name`. A record can then carry an `endorsed` field with an **inclusion proof**: the hash of the endorsing change, the record's leaf index, the tree size and the list of hashes linking the leaf to the root.
+
+A record with a valid inclusion proof stays valid after its certificate stops working, as long as:
+
+1. the record's signature and its certificate's signature are valid;
+2. the certificate's `app` equals the record's `app`, its scopes include `publish`, and its client isn't revoked;
+3. the certificate's `by` is the device the endorsing change ended: its `device` for `sign-out` and `remove-device`, or the outgoing master for `set-master`;
+4. the endorsement counts, judged on the whole log: if the ended device has no master removal, an endorsement in any of its sign-outs (section 5.4, step 4) counts; once it has master removals (step 2), the record must be endorsed by every one of them, and a removal without `endorse` endorses nothing; for an outgoing master, the endorsement must be in its next link (step 1).
+
+Rule 3 means a thief signing out someone else's device can only endorse records made through that device's approvals, which the thief can't forge. Rule 4 means posts a thief made before a hasty sign-out can still be dropped by the master. The aza app builds endorsements automatically from the records it has seen, and lists them so the person can leave out any they don't recognise. A record's `sig` covers everything except `sig` and `endorsed`, so a current device can attach an inclusion proof to a stored record without re-signing it.
+
+**Contact tags.** Each identity has a **contact secret**: 32 random bytes made by the aza app and kept in its own sync data, so every device has it. Each app's **contact tag** is HKDF over the contact secret with `info` = `"aza contact tag v1"` followed by the app ID. Key packages and inbox items for an app are stored under its contact tag, not under the app's name, so only someone who knows the contact secret, or a tag, can find out whether the identity uses that app. The aza app gives each `receive` client its app's tag in an envelope (section 9). People get the contact secret from a QR code or link the person shares, from an accepted contact request, or from the profile's `contact` field if the person has chosen to publish it. **Replacing the contact secret.** The aza app makes a new contact secret, writes new tag envelopes, and removes the key packages under the old tags; clients register and publish again under the new tags. Clients stay registered under the old tags too, so people already in conversations can still deliver to them, while new contacts need the new secret. The aza app offers this after a device is signed out, because a stolen device could read the contact secret, and updates the profile's `contact` field if it was published.
+
+**Contact requests.** Someone without the contact secret can send a **contact request** to the identity's requests inbox, which isn't tied to any app. It is sealed to one of the identity's current devices and holds the sender's identity ID and home node URL, the app they want to talk on, their own client's certificate (which must have `receive`) and contact tag, an optional note, the recipient's identity ID, a `time`, and a signature by that client over all of it. The aza app checks the certificate, the signature, the recipient and that the time is recent before showing it. A node may demand proof of work for each request (section 12). The aza app shows it as "*name* wants to message you on *app*". If the person accepts, the aza app sends that app's tag to the sender's client, sealed to its encryption key, through the sender's own inbox.
+
+**Inbox.** An **inbox item** is a sealed message for one of an identity's devices or `receive` clients:
 
 ```json
 {
   "to": "<device ID or client key fingerprint>",
-  "app": "chat.example",
   "sealed": "…"
 }
 ```
 
-`sealed` is sealed (section 3) to the holder's encryption key: a device's from the log, a client's from its certificate. What's inside is up to the app, and the node doesn't know who sent an item. A node only accepts items whose `to` is a current device or a client whose `receive` certificate for that `app` it holds; a `receive` client therefore stores its certificate on the home node. Senders learn a client's fingerprint and encryption key from its key package. Each node sets its own limits on inboxes, and may demand proof of work for each item, as for new identities (section 12).
+`sealed` is sealed (section 3) to the holder's encryption key: a device's from the log, a client's from its certificate. What's inside is up to the app, and the node doesn't know who sent an item. Under a contact tag, a node only accepts items whose `to` is a `receive` client registered under that tag; on the requests inbox, only items whose `to` is a current device. A `receive` client registers by storing its certificate and publishing key packages under its tag. The node can't work out a tag itself, so the aza app binds each tag to its app (section 11.1), and the node refuses clients of other apps under it. Senders learn a client's fingerprint and encryption key from its key package. Each node sets its own limits on inboxes, and may demand proof of work for each item, as for new identities (section 12).
 
-**Key packages.** A messenger client with `receive` publishes [MLS](https://www.rfc-editor.org/rfc/rfc9420) **key packages** (RFC 9420) on the home node: small signed bundles that let other people add it to an encrypted group while it's offline. Each key package's credential is the client's certificate, so anyone adding the client can check it belongs to the identity. Anyone can ask for key packages, so anyone can find out whether an identity uses a given messaging app. Key packages are single-use, so the node hands each one out only once, and a client keeps several published.
+**Key packages.** A messenger client with `receive` publishes [MLS](https://www.rfc-editor.org/rfc/rfc9420) **key packages** (RFC 9420) under its contact tag on the home node: small signed bundles that let other people add it to an encrypted group while it's offline. Each key package's credential is the client's certificate, so anyone adding the client can check it belongs to the identity. Key packages are single-use, so the node hands each one out only once, and a client keeps several published.
 
 ## 11. Nodes
 
-A **node** is a server that stores change logs, sync data, envelopes, certificates, public records, inbox items and key packages. Anyone can run one. Each node's operator decides what it stores, and may refuse any upload. aza runs a node too, and in the protocol it is like any other.
+A **node** is a server that stores change logs, sync data, envelopes, certificates, profile records, public records, blobs, inbox items and key packages. Anyone can run one. Each node's operator decides what it stores, and may refuse any upload. aza runs a node too, and in the protocol it is like any other.
 
-An identity's **home node** is the node it chose, with a `set-home` change, to hold its change log, sync data and envelopes. During setup the aza app suggests aza's node; any node works. The aza node stores up to 1 MB of sync data, envelopes and public records per identity; other nodes set their own limits. The aza node never counts the change log toward that limit, so an identity can always upload a sign-out or removal, however full its storage is.
+An identity's **home node** is the node it chose, with a `set-home` change, to hold its change log and everything else the identity stores. During setup the aza app suggests aza's node; any node works. The aza node stores up to 1 MB of sync data, envelopes, profile records, public records and blobs per identity; other nodes set their own limits. The aza node never counts the change log toward that limit, so an identity can always upload a sign-out or removal, however full its storage is.
 
-**Moving.** Before signing a `set-home` for a new node, the aza app copies the change log, sync data, envelopes, certificates, public records, inbox items and key packages there. After the log gains that `set-home`, the old node keeps answering requests for the log for at least one year. Anyone who still has the old address, including clients whose certificate names the old node, sees the latest `set-home` and follows it.
+**Moving.** Before signing a `set-home` for a new node, the aza app copies the change log, sync data, envelopes, certificates, profile records, public records, blobs, inbox items and key packages there. After the log gains that `set-home`, the old node keeps answering requests for the log for at least one year. Anyone who still has the old address, including clients whose certificate names the old node, sees the latest `set-home` and follows it.
 
 **Copies.** A node may also keep copies of other identities' change logs, for example of people its own identities interact with, so they can still be found after their old node disappears. Whether it does is up to its operator.
 
@@ -376,12 +412,20 @@ Every node answers these HTTP requests under `https://<node>/aza/v1/`. Request a
 | `GET records/{identity}/{app}?since={n}` | anyone | returns the public records stored or changed since the node's counter `n` |
 | `PUT records/{identity}/{app}/{name}` | a client with `publish` for `app` | stores one public record signed by that same client, under the same version rule as sync data |
 | `DELETE records/{identity}/{app}/{name}` | a client with `publish` for `app` | deletes a public record |
-| `POST inbox/{identity}/{app}` | anyone | leaves an inbox item, if the node accepts it (section 10) |
-| `GET inbox/{identity}/{app}/{holder}?since={n}` | the holder: a current device, or a client with `receive` for `app` | returns its inbox items for `app` since the node's counter `n` |
-| `DELETE inbox/{identity}/{app}/{holder}/{item}` | the holder | deletes an inbox item it has handled |
-| `POST keypackages/{identity}/{app}` | a client with `receive` for `app` | publishes key packages |
-| `GET keypackages/{identity}/{app}` | anyone | hands out one unused key package for each current `receive` client of `app`, removing it from the node |
-| `GET picture?url={url}` | a current device or client of an identity whose home node this is | optional: fetches a profile picture on the identity's behalf, so the image's host never learns who is looking at whom |
+| `PUT records/{identity}/{app}/{name}/endorsed` | a current device | attaches or replaces the inclusion proof of the stored record |
+| `POST inbox/{identity}/{tag}` | anyone who knows the tag | leaves an inbox item, if the node accepts it (section 10) |
+| `POST inbox/{identity}/requests` | anyone | leaves a contact request for the identity's devices |
+| `GET inbox/{identity}/{tag or requests}/{holder}?since={n}` | the holder: a current device, or a `receive` client registered under that tag | returns its inbox items since the node's counter `n` |
+| `DELETE inbox/{identity}/{tag or requests}/{holder}/{item}` | the holder | deletes an inbox item it has handled |
+| `POST keypackages/{identity}/{tag}` | a client with `receive` whose app's tag this is | publishes key packages and registers the client under the tag |
+| `GET keypackages/{identity}/{tag}` | anyone who knows the tag | hands out one unused key package for each current client registered under it, removing it from the node |
+| `GET profile/{identity}` | anyone | returns the newest profile record from each device |
+| `PUT profile/{identity}` | a current device | stores a profile record; its `version` must be higher than any the node holds |
+| `PUT blobs/{identity}/{hash}` | a current device | stores a blob, such as a profile picture, whose SHA-256 hash is `{hash}` |
+| `GET blobs/{identity}/{hash}` | anyone | returns a blob; any node may serve a copy it holds |
+| `DELETE blobs/{identity}/{hash}` | a current device | deletes a blob; a node may also drop blobs the newest profile doesn't refer to |
+| `DELETE keypackages/{identity}/{tag}` | a current device | removes a tag's key packages, when the contact secret is replaced |
+| `PUT tags/{identity}/{tag}` | a current device | binds a tag to an app, or changes the binding |
 
 Requests that need permission carry an `aza-auth` header: the base64url encoding of a CBOR object with the identity ID, `by` (a device ID, or a client key fingerprint whose certificate the node already holds), `time` (Unix seconds), a random 16-byte `nonce` and `sig`. `sig` is `by`'s signature over the CBOR array `[host, method, path with query, time, nonce, hash of the body]`. The header is about 4.6 KB. The node accepts it only if `host` is its own, `time` is within 5 minutes of its clock, it hasn't seen this `nonce` in that time, and `by` has permission after reading the newest log it holds:
 
@@ -410,13 +454,13 @@ The spec lives in a public repository that anyone can fork. Each node and app ch
 
 aiden, whose domain is `sidny.me`:
 
-1. **Create.** The aza app on aiden's iPhone makes the master's keys and finds a counter giving enough work. The master signs the genesis change, whose hash is aiden's identity ID. The master then signs `add-device` for the iPhone's own device, `set-profile` (name "aiden") and `set-home` (aza's node). The app makes the first data secret, seals envelopes of it for the master and the iPhone, and uploads the log and envelopes to aza's node.
+1. **Create.** The aza app on aiden's iPhone makes the master's keys and finds a counter giving enough work. The master signs the genesis change, whose hash is aiden's identity ID. The master then signs `add-device` for the iPhone's own device and `set-home` (aza's node), and the iPhone signs a profile record with `name: "aiden"`. The app makes the first data secret and a contact secret, seals envelopes of the data secret for the master and the iPhone, and uploads the log, profile and envelopes to aza's node.
 2. **Back up.** The app saves the master's keys into one backup file and its next key into another, each protected by its own password, and deletes them from the iPhone. aiden keeps the two files in different places. Nothing in the log changes.
 3. **Laptop.** The aza app on aiden's Mac makes the Mac's keys and shows a QR code holding its public keys. aiden scans it with the iPhone, which signs `add-device` for the Mac and seals an envelope of the data secret for it.
-4. **Handle.** aiden adds `_aza.sidny.me TXT "aza=<identity ID> node=<aza node URL>"` and signs `set-profile` with `handle: "sidny.me"`. Apps now show `@sidny.me`.
+4. **Handle.** aiden adds `_aza.sidny.me TXT "aza=<identity ID> node=<aza node URL>"` and signs `set-handle` with `sidny.me`. Apps now show `@sidny.me`.
 5. **A game.** coolgame on the Mac asks to sign in with scope `sign-in` and a return URL on `coolgame.com`. The Mac's aza app shows the request, aiden approves, and the Mac signs a certificate and opens the return URL, which only the real coolgame can receive. coolgame's server fetches aiden's log, checks the certificate (section 7) and has the game sign a challenge. Nothing about coolgame appears in aiden's change log.
-6. **Stolen phone.** The Mac downloads the newest log and signs `sign-out` for the iPhone. Anything the thief did with the phone that the Mac hadn't seen is ignored, except sign-outs and revocations (section 5.4), and certificates the iPhone signed stop working. To make it final, and to undo anything the thief did, such as signing out the Mac, aiden opens the master's backup file in the aza app and removes the iPhone with the master, keeping its changes up to the last one aiden trusts. The aza app then replaces the data secret, so the phone can't read anything written after that.
+6. **Stolen phone.** The Mac downloads the newest log and signs `sign-out` for the iPhone. Anything the thief did with the phone that the Mac hadn't seen is ignored, except sign-outs and revocations (section 5.4), and certificates the iPhone signed stop working. To make it final, and to undo anything the thief did, such as signing out the Mac, aiden opens the master's backup file in the aza app and removes the iPhone with the master, keeping its changes up to the last one aiden trusts. The aza app then replaces the data secret, so the phone can't read anything written after that, re-signs the profile with the Mac, and offers to replace the contact secret.
 7. **Offline apps.** Heavier works with none of this. Turning on aza sync makes Heavier ask for a certificate with `read` and `write`. It gets its app key from its envelope on aiden's home node, then uploads encrypted workouts there.
 8. **Plarza.** aiden signs in to Plarza with a certificate that has `sign-in` and `publish`. Each post is a public record on aiden's home node, and anyone can check it came from `@sidny.me`.
 9. **A friend joins.** aiden's friend signs up to Plarza with their email. Plarza's provider creates an identity with a hosted master and adds the friend's phone as a device. A year later the friend taps "take control" in the aza app; the provider hands off, and the friend now holds their own master, with the same identity ID and the same followers.
-10. **Messages.** A messenger on aiden's Mac gets a certificate with `receive` and publishes key packages. A friend's messenger fetches one, adds aiden's Mac to an MLS group, and leaves the invitation in aiden's inbox.
+10. **Messages.** A messenger on aiden's Mac gets a certificate with `receive` and its contact tag, and publishes key packages under that tag. A friend scans aiden's contact QR code, so the friend's messenger can work out the tag, fetch a key package, add aiden's Mac to an MLS group and leave the invitation in aiden's inbox. Someone who doesn't know aiden sends a contact request instead, and aiden accepts it in the aza app.
