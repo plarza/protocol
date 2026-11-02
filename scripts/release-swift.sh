@@ -13,8 +13,9 @@ VERSION=${1:?usage: scripts/release-swift.sh <version>}
 ZIP=AzaKitFFI.xcframework.zip
 
 ./scripts/build-swift.sh
-WORK=$(mktemp -d)
-trap 'rm -rf $WORK' EXIT
+# Kept in swift/Generated, so a release whose push fails can be finished by hand.
+WORK=swift/Generated
+rm -f $WORK/$ZIP
 ditto -c -k --sequesterRsrc --keepParent swift/Generated/AzaKitFFI.xcframework $WORK/$ZIP
 CHECKSUM=$(swift package compute-checksum $WORK/$ZIP)
 
