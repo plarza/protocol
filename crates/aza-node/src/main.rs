@@ -2,13 +2,13 @@
 //!
 //! ```text
 //! aza-node --url https://node.example [--listen 0.0.0.0:8080] [--db aza-node.db]
-//!          [--min-work 6] [--quota 1000000]
+//!          [--min-work 6] [--quota 1000000] [--max-total <bytes>]
 //! ```
 use aza_node::Config;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: aza-node --url <public URL> [--listen <addr>] [--db <file>] [--min-work <bits>] [--quota <bytes>]"
+        "usage: aza-node --url <public URL> [--listen <addr>] [--db <file>] [--min-work <bits>] [--quota <bytes>] [--max-total <bytes>]"
     );
     std::process::exit(2)
 }
@@ -21,6 +21,7 @@ async fn main() -> std::io::Result<()> {
     let mut db = Some("aza-node.db".to_string());
     let mut min_work = None;
     let mut quota = None;
+    let mut max_total = None;
     while let Some(a) = args.next() {
         let mut val = || args.next().unwrap_or_else(|| usage());
         match a.as_str() {
@@ -29,6 +30,7 @@ async fn main() -> std::io::Result<()> {
             "--db" => db = Some(val()),
             "--min-work" => min_work = Some(val().parse().unwrap_or_else(|_| usage())),
             "--quota" => quota = Some(val().parse().unwrap_or_else(|_| usage())),
+            "--max-total" => max_total = Some(val().parse().unwrap_or_else(|_| usage())),
             _ => usage(),
         }
     }
@@ -37,6 +39,7 @@ async fn main() -> std::io::Result<()> {
     if let Some(w) = min_work {
         config.min_work = w;
     }
+    config.max_total = max_total;
     if let Some(q) = quota {
         config.quota = q;
     }

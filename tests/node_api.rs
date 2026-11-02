@@ -477,3 +477,24 @@ async fn the_last_device_signs_out_and_its_backup_brings_everything_back() {
     let mut notes = client(&mut restored, "notes.example", &[READ, WRITE]).await;
     assert_eq!(notes.read_all().await.unwrap()[0].data, b"kept");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_node_refuses_new_data_and_keeps_serving_reads() {
+    let node = aza_tests::node_with(|c| c.max_total = Some(2_000_000)).await;
+    let mut a = AzaApp::create(&node, "A", 6).await.unwrap();
+    // Pictures until the node is full.
+    let mut refused = None;
+    for i in 0..40u8 {
+        let image = [vec![0x89, b'P', b'N', b'G', i], vec![i; 200_000]].concat();
+        if let Err(e) = a.set_picture(&image, "image/png").await {
+            refused = Some(e);
+            break;
+        }
+    }
+    assert_eq!(status(refused.expect("the node never filled up")), 413);
+    // New identities are refused too; reads and health checks go on.
+    assert!(AzaApp::create(&node, "B", 6).await.is_err());
+    assert!(NodeClient::new(&node).unwrap().get_log(&a.identity).await.unwrap().len() > 1);
+    assert!(a.profile().await.unwrap().is_some());
+    assert_eq!(reqwest::get(format!("{node}/healthz")).await.unwrap().status().as_u16(), 200);
+}

@@ -40,6 +40,9 @@ pub struct Config {
     pub max_changes: u64,
     /// The most items one holder's inbox may hold.
     pub max_inbox: u64,
+    /// The most bytes the whole database may take: past it the node refuses anything that
+    /// stores more, from anyone, and keeps serving reads and deletes.
+    pub max_total: Option<u64>,
 }
 
 impl Config {
@@ -51,6 +54,7 @@ impl Config {
             quota: 100_000_000,
             max_changes: 100_000,
             max_inbox: 10_000,
+            max_total: None,
         }
     }
 }
@@ -308,6 +312,12 @@ impl Node {
     }
 
     fn dispatch(&self, req: Req) -> R<Value> {
+        if let Some(max) = self.config.max_total
+            && matches!(req.method, Method::POST | Method::PUT)
+            && self.store().size()? >= max
+        {
+            return Err(Fail::TooLarge("this node is full".into()));
+        }
         let segs: Vec<&str> = req.segs.iter().map(String::as_str).collect();
         let m = req.method.clone();
         match (m, segs.as_slice()) {

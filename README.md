@@ -503,7 +503,7 @@ cargo test                                                     # every end-to-en
 cargo run -p aza-node -- --url https://node.example --listen 0.0.0.0:8080 --db aza-node.db
 ```
 
-`aza-node` also takes `--min-work <bits>` (the admission price) and `--quota <bytes>` (storage per identity, never counting the change log).
+`aza-node` also takes `--min-work <bits>` (the admission price), `--quota <bytes>` (storage per identity, never counting the change log) and `--max-total <bytes>` (the most the whole database may take; past it the node refuses anything that stores more, from anyone, and keeps serving reads). A public node needs `--max-total`: identities are cheap to make, so without it strangers can fill the disk.
 
 ### What Verus proves
 

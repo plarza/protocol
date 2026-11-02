@@ -55,6 +55,15 @@ impl Store {
         self.db.query_row("SELECT 1", [], |_| Ok(()))
     }
 
+    /// The database's size in bytes.
+    pub fn size(&self) -> rusqlite::Result<u64> {
+        self.db
+            .query_row("SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n as u64)
+    }
+
     pub fn transaction<T>(&mut self, f: impl FnOnce(&Store) -> rusqlite::Result<T>) -> rusqlite::Result<T> {
         self.db.execute_batch("BEGIN IMMEDIATE")?;
         match f(self) {
