@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # A push to main deploys the node, so it is verified first (scripts/verify.sh).
+# Every line git sends is read first: leaving any unread fails a push of several refs.
+verify=
 while read -r _ revision ref _; do
   if [[ $ref == refs/heads/main && $revision != 0000000000000000000000000000000000000000 ]]; then
-    exec "$(git rev-parse --show-toplevel)/scripts/verify.sh" "$revision" < /dev/null
+    verify=$revision
   fi
 done
+[[ -z $verify ]] || exec "$(git rev-parse --show-toplevel)/scripts/verify.sh" "$verify" < /dev/null
