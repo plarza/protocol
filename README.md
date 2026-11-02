@@ -397,7 +397,7 @@ Rule 3 means a thief signing out someone else's device can only endorse records 
 
 A **node** is a server that stores change logs, sync data, envelopes, certificates, profile records, public records, blobs, tag bindings, registrations, inbox items and key packages. Anyone can run one. Each node's operator decides what it stores, and may refuse any upload. aza runs a node too, and in the protocol it is like any other.
 
-An identity's **home node** is the node it chose, with a `set-home` change, to hold its change log and everything else the identity stores. During setup the aza app suggests aza's node; any node works. The aza node stores up to 1 MB of sync data, envelopes, profile records, public records and blobs per identity; other nodes set their own limits. The aza node never counts the change log toward that limit, so an identity can always upload a sign-out or removal, however full its storage is.
+An identity's **home node** is the node it chose, with a `set-home` change, to hold its change log and everything else the identity stores. During setup the aza app suggests aza's node; any node works. The aza node stores up to 100 MB of sync data, envelopes, profile records, public records and blobs per identity; other nodes set their own limits. The aza node never counts the change log toward that limit, so an identity can always upload a sign-out or removal, however full its storage is.
 
 **Moving.** Before signing a `set-home` for a new node, the aza app moves everything the identity stores: it fetches it from the old node with `GET export` and uploads it to the new one with `POST import`. The new node checks every signature it can (changes, certificates, profile and public records, envelopes) and keeps sync data, blobs, tag bindings, registrations, inbox items and key packages as they were, without the usual version and client checks. The new node judges the import's permission using the change log inside it, and the aza app binds every tag again on the new node straight after the import. The aza app uploads the new `set-home` to both nodes, and the old node keeps answering requests for the log for at least one year. Anyone who still has the old address, including clients whose certificate names the old node, sees the latest `set-home` and follows it.
 
@@ -533,4 +533,4 @@ Not yet proven: that the decoder accepts every canonical encoding (it is proven 
 Everything apps and other implementations depend on is in the sections above. These are this implementation's own choices:
 
 - ML-DSA-65 signs hedged, with fresh randomness, as FIPS 204 recommends.
-- The node keeps at most 100,000 changes per log and 10,000 inbox items per holder, and 1 MB of other data per identity unless `--quota` says otherwise.
+- The node keeps at most 100,000 changes per log and 10,000 inbox items per holder, and 100 MB of other data per identity unless `--quota` says otherwise.

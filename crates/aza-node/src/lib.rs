@@ -48,7 +48,7 @@ impl Config {
             url: url.into(),
             db: None,
             min_work: aza::work::MIN_WORK,
-            quota: 1_000_000,
+            quota: 100_000_000,
             max_changes: 100_000,
             max_inbox: 10_000,
         }
