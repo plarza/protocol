@@ -1,0 +1,5 @@
+target
+swift
+*.db
+*.db-shm
+*.db-wal

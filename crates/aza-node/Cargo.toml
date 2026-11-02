@@ -1,0 +1,13 @@
+[package]
+name = "aza-node"
+description = "An aza node: stores change logs and everything identities keep, over HTTP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = "0.8"
+aza.workspace = true
+hex = "0.4"
+rusqlite = { version = "0.41", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }

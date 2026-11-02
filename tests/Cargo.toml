@@ -1,0 +1,40 @@
+[package]
+name = "aza-tests"
+description = "End-to-end tests: real nodes over HTTP, driven through the client library"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+path = "support.rs"
+
+[dependencies]
+aza.workspace = true
+aza-node.workspace = true
+base64 = "0.22"
+reqwest = { version = "0.13", default-features = false }
+tokio = { version = "1", features = ["full"] }
+
+[[test]]
+name = "smoke"
+path = "smoke.rs"
+
+[[test]]
+name = "walkthrough"
+path = "walkthrough.rs"
+
+[[test]]
+name = "log_rules"
+path = "log_rules.rs"
+
+[[test]]
+name = "node_api"
+path = "node_api.rs"
+
+[[test]]
+name = "hosted"
+path = "hosted.rs"
+
+[[test]]
+name = "persistence"
+path = "persistence.rs"

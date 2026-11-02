@@ -1,6 +1,6 @@
 # aza identity
 
-This document specifies how accounts work across aza: one account that signs in to every aza app and to apps built by anyone else, without an accounts server. It describes only what is decided.
+This document specifies how accounts work across aza: one account that signs in to every aza app and to apps built by anyone else, without an accounts server. It describes only what is decided. The implementation in this repository is described at the end, under **Implementation**.
 
 ## 1. Goals
 
@@ -47,6 +47,8 @@ Each of these is specified in detail later; this is just enough to read the rest
 **Symmetric encryption.** [AES-256-GCM](https://en.wikipedia.org/wiki/Galois/Counter_Mode) with a random 12-byte **nonce** (a value used once per encryption). It also detects any tampering with the encrypted data.
 
 **Sealing.** Encrypting data so that only the holder of one encryption key pair can read it. aza uses [HPKE](https://www.rfc-editor.org/rfc/rfc9180) (RFC 9180) in its base mode with X-Wing, HKDF-SHA256 and AES-256-GCM, with `info` = `"aza seal v1"` and empty associated data, using HPKE's single-shot `Seal` and `Open`. A **sealed box** is HPKE's 1120-byte encapsulated key followed by its ciphertext.
+
+**Private keys.** A signing private key is 64 bytes: the Ed25519 secret key of RFC 8032 followed by the 32-byte ML-DSA-65 key generation seed of FIPS 204. An encryption private key is the 32-byte X-Wing decapsulation key.
 
 **Encoding.** Everything is encoded as [CBOR](https://en.wikipedia.org/wiki/CBOR) using the deterministic encoding of RFC 8949 section 4.2.1, which gives every value exactly one byte form. A signature covers the encoded object without its `sig` field; a hash covers the whole encoded object. A fingerprint is the hash of a public key's bytes as laid out above. Keys, signatures and hashes are CBOR byte strings. Nodes and readers reject any object that isn't in exactly this deterministic form, and verify signatures exactly one way: Ed25519 as in RFC 8032 section 5.1.7 with the cofactorless equation `[S]B = R + [k]A`, rejecting `S` ≥ L, non-canonical encodings of `R` and `A`, and small-order `A`; ML-DSA-65 as pure ML-DSA from FIPS 204 with an empty context string. That way every reader accepts exactly the same signatures, so nobody can make a second valid copy of someone else's signed object with a different hash. Byte strings in URL paths (identity IDs, device IDs, fingerprints, hashes and contact tags, section 10) are written as lowercase hex. An item `name` in a path is a single segment, percent-encoded as in RFC 3986 with every character other than letters, digits, `-`, `.`, `_` and `~` encoded (so `/` becomes `%2F`), and that exact form is what the `aza-auth` header signs (section 11.1). Examples in this document are written as JSON, with byte strings shortened to hex like `"9f2c…"`.
 
@@ -123,7 +125,7 @@ A **device ID** names one device: the hash of the change that brought it in. For
 | `revoke-client` | `client` (fingerprint) | any device | revokes a client (section 7) |
 | `new-secret` | `check` | the master only | announces a new data secret (section 9) |
 
-`key` is a signing public key and `enc` an encryption public key.
+`key` is a signing public key and `enc` an encryption public key. "Among its ancestors" counts discarded changes too.
 
 ### 5.4 Reading the log
 
@@ -159,6 +161,8 @@ Judging on their own means two devices that sign each other out at the same mome
 4. it is an ancestor of every sign-out of `by`.
 
 When several changes set the same thing, such as two `set-handle`s, the last one applied wins.
+
+**Fine points.** A sign-out or revocation that doesn't count (step 4) does nothing when it is reached; it isn't tried again under rules 1 to 4. A change whose `by` names a device that no change in the log brings in isn't discarded, but fails rule 2. "An ancestor of every next link" means of every copy of it. A change that is its own ancestor, or has such a change among its ancestors, needs a SHA-256 collision; readers leave it out of the log.
 
 **What this means in practice.**
 
@@ -280,11 +284,12 @@ A **backup file** holds a device's private keys, or a master's next key, encrypt
 }
 ```
 
-The password is turned into a 256-bit key with [Argon2id](https://en.wikipedia.org/wiki/Argon2), a deliberately slow and memory-hungry function that makes guessing passwords expensive. `salt`, `memory` (in KiB; 65536 KiB is 64 MiB), `iterations` and `parallelism` are its settings, chosen when the file is made. That key encrypts the contents with AES-256-GCM. The encrypted contents are:
+The password is turned into a 256-bit key with [Argon2id](https://en.wikipedia.org/wiki/Argon2), a deliberately slow and memory-hungry function that makes guessing passwords expensive. `salt`, `memory` (in KiB; 65536 KiB is 64 MiB), `iterations` and `parallelism` are its settings, chosen when the file is made. That key encrypts the contents with AES-256-GCM. The nonce is random, and the associated data is empty. The encrypted contents are a CBOR map:
 
-- the identity ID,
-- the device's private signing and encryption keys (or, for a next key, its private signing key),
-- the home node URL.
+- `identity`: the identity ID,
+- `key`: the device's private signing key (section 3), or the next key,
+- `enc`: the device's private encryption key, absent for a next key,
+- `node`: the home node URL.
 
 A password is required. Only the aza app opens backup files. To use one, you open it in the aza app on a phone or computer; the aza app uses the keys for that session only, for example to add the machine as a new device, and then forgets them.
 
@@ -373,7 +378,7 @@ Rule 3 means a thief signing out someone else's device can only endorse records 
 
 **Contact tags.** Each identity has a **contact secret**: 32 random bytes made by the aza app and kept in its own sync data, so every device has it. Each app's **contact tag** is HKDF over the contact secret with `info` = `"aza contact tag v1"` followed by the app ID. Key packages and inbox items for an app are stored under its contact tag, not under the app's name, so apart from the home node, only someone who knows the contact secret, or a tag, can find out whether the identity uses that app. The aza app gives each `receive` client its app's tag in an envelope (section 9). People get the contact secret from a QR code or link the person shares, or from the profile's `contact` field if the person has chosen to publish it; an accepted contact request gives only one app's tag. **Replacing the contact secret.** The aza app keeps every contact secret with its `generation` in its own sync data, so it can keep binding the old tags. It makes a new contact secret with the next generation and commits it to that sync data first, so the version rule puts two devices replacing it at once in order and only one wins. It then marks each app's new tag current (`PUT tags`), which makes the old ones old, writes new tag envelopes, and removes the key packages under the old tags. Any aza app that finds a contact secret in its sync data with a higher `generation` than the tag bindings or envelopes reflect finishes an interrupted replacement the same way. Clients register (see **Inbox** below) and publish again under the new tags. Clients stay registered under the old tags too, new `receive` clients also get envelopes for their app's old tags and register under all of them, and every client keeps reading the inbox under each tag it has, so people already in conversations can still deliver into those conversations. Anyone who only knows an old tag can't start a new conversation, because old tags have no key packages; they need the new secret or a new contact request first. The aza app offers this after a device is signed out, because a stolen device could read the contact secret, and updates the profile's `contact` field if it was published.
 
-**Contact requests.** Someone without the contact secret can send a **contact request** to the identity's requests inbox, which isn't tied to any app. It is sealed to one of the identity's current ordinary devices (the master only if there are none) and holds the sender's identity ID and home node URL, the app they want to talk on, their own client's certificate (which must have `receive`) and contact tag, an optional note, the recipient's identity ID, a `time`, and a signature by that client over all of it. The aza app checks that the certificate's `identity` is the sender's identity ID and its `app` is the requested app, that the certificate passes checks 1 to 3 of section 7 against the sender's change log, and checks the signature, the recipient and that `time` is within the last day, before showing it. The aza app shows it as "*name* wants to message you on *app*". If the person accepts, the aza app sends the sender's client an **acceptance**, sealed to its encryption key, through the sender's own inbox under the tag the request gave: a CBOR object with the recipient's identity ID, the app ID, that app's newest tag (highest `generation`), the request's `time`, `by` (the device ID of one of the recipient's current devices) and that device's signature. The client uses the tag only if `by` is current at the end of the recipient's change log, the signature is valid for that device's key, and the identity ID, app ID and `time` match a contact request it sent that hasn't been accepted yet.
+**Contact requests.** Someone without the contact secret can send a **contact request** to the identity's requests inbox, which isn't tied to any app. It is sealed to one of the identity's current ordinary devices (the master only if there are none) and holds the sender's identity ID and home node URL, the app they want to talk on, their own client's certificate (which must have `receive`) and contact tag, an optional note, the recipient's identity ID, a `time`, and a signature by that client over all of it. The aza app checks that the certificate's `identity` is the sender's identity ID and its `app` is the requested app, that the certificate passes checks 1 to 3 of section 7 against the sender's change log, and checks the signature, the recipient and that `time` is within the last day, before showing it. The aza app shows it as "*name* wants to message you on *app*". If the person accepts, the aza app sends the sender's client an **acceptance**, sealed to its encryption key, through the sender's own inbox under the tag the request gave: a CBOR object with the recipient's identity ID, the app ID, that app's newest tag (highest `generation`), the request's `time`, `by` (the device ID of one of the recipient's current devices) and that device's signature. The client uses the tag only if `by` is current at the end of the recipient's change log, the signature is valid for that device's key, and the identity ID, app ID and `time` match a contact request it sent that hasn't been accepted yet. As CBOR, a contact request is a map of `identity`, `node`, `app`, `certificate`, `tag`, `note` (optional), `recipient`, `time` and `sig`; an acceptance is a map of `identity`, `app`, `tag`, `generation`, `time`, `by` and `sig`.
 
 **Inbox.** An **inbox item** is a sealed message for one of an identity's devices or `receive` clients:
 
@@ -386,7 +391,7 @@ Rule 3 means a thief signing out someone else's device can only endorse records 
 
 `sealed` is sealed (section 3) to the holder's encryption key: a device's from the log, a client's from its certificate. What's inside is up to the app, and the node doesn't know who sent an item. Under a contact tag, a node only accepts items whose `to` is a `receive` client registered under that tag; on the requests inbox, only items whose `to` is a current ordinary device, or the master if there are none. A `receive` client **registers** under its tag by storing its certificate there (`PUT registrations`); a registration stays until the client is revoked or a device deletes it, whatever happens to key packages. A client checks its registrations whenever it reads its inbox and registers again if one is gone, so a stolen device deleting them only causes a short gap. The node can't work out a tag itself, so the aza app binds each tag to its app (section 11.1), and the node refuses clients of other apps under it. Senders learn a client's fingerprint and encryption key from its key package. Each node sets its own limits on inboxes.
 
-**Key packages.** A messenger client with `receive` publishes [MLS](https://www.rfc-editor.org/rfc/rfc9420) **key packages** (RFC 9420): small signed bundles that let other people add it to an encrypted group while it's offline. It publishes them on the home node only under its app's newest tag, the one from the contact-tag envelope with the highest `generation` signed by a current device; under older tags it keeps its registration and reads its inbox but publishes no key packages. Each key package's credential is the client's certificate plus a signature by the client key over `["aza mls key v1", identity ID, app ID, MLS signature key]`, binding the key package's MLS signature key to the client. Anyone adding the client checks that signature, that the certificate's `identity` is the identity they meant to reach, that its `app` is the intended app and equals the app ID in the signed array, that its scopes include `receive`, and that it passes checks 1 to 3 of section 7 against that identity's change log. Key packages are single-use, so the node hands each one out only once, and a client keeps several published.
+**Key packages.** A messenger client with `receive` publishes [MLS](https://www.rfc-editor.org/rfc/rfc9420) **key packages** (RFC 9420): small signed bundles that let other people add it to an encrypted group while it's offline. It publishes them on the home node only under its app's newest tag, the one from the contact-tag envelope with the highest `generation` signed by a current device; under older tags it keeps its registration and reads its inbox but publishes no key packages. Each key package's credential is the client's certificate plus a signature by the client key over `["aza mls key v1", identity ID, app ID, MLS signature key]`, binding the key package's MLS signature key to the client. Anyone adding the client checks that signature, that the certificate's `identity` is the identity they meant to reach, that its `app` is the intended app and equals the app ID in the signed array, that its scopes include `receive`, and that it passes checks 1 to 3 of section 7 against that identity's change log. Key packages are single-use, so the node hands each one out only once, and a client keeps several published. On the node each one is stored as a map of `credential` (with `certificate`, `key`, the MLS signature key, and `sig`) and `package`, the MLS key package itself.
 
 ## 11. Nodes
 
@@ -400,7 +405,7 @@ An identity's **home node** is the node it chose, with a `set-home` change, to h
 
 ### 11.1 Node API
 
-Every node answers these HTTP requests under `https://<node>/aza/v1/`. Request and response bodies are CBOR (`content-type: application/cbor`).
+Every node answers these HTTP requests under `https://<node>/aza/v1/`. A node's URL is `https://` and a host with no path; `http://` is allowed only on a loopback host, for testing. Request and response bodies are CBOR (`content-type: application/cbor`).
 
 | Request | Who may make it | What it does |
 |---|---|---|
@@ -432,9 +437,13 @@ Every node answers these HTTP requests under `https://<node>/aza/v1/`. Request a
 | `DELETE keypackages/{identity}/{tag}` | a current device | removes a tag's key packages, when the contact secret is replaced |
 | `POST pairing` | anyone | stores a new device's public keys for ten minutes and returns a URL to fetch them; the aza app checks them against the hash in the QR code |
 | `PUT pairing/{id}/reply` | anyone with the pairing URL | stores the approving device's reply: the identity ID, home node URL and new device ID, sealed to the new device's encryption key. The node keeps only the first reply. The new device checks its `add-device` change in the log, then shows the identity's name, handle (checked through DNS) and ID, and only joins once the person confirms it's theirs. |
+| `GET pairing/{id}` | anyone with the pairing URL | returns the new device's public keys, until they expire |
+| `GET pairing/{id}/reply` | anyone with the pairing URL | returns the sealed reply, once there is one |
 | `PUT tags/{identity}/{tag}` | a current device | binds a tag to an app and marks it current or old, or changes that. Marking a tag current makes the app's previous current tag old, so each app has one current tag, set by the most recent mark from a current device. A binding only counts while the device that made it is current; the aza app binds every tag again, old and current, whenever a device stops being current, including a master after a handoff. |
 
-Requests that need permission carry an `aza-auth` header: the base64url encoding of a CBOR object with the identity ID, `by` (a device ID, or a client key fingerprint whose certificate the node already holds), `time` (Unix seconds), a random 16-byte `nonce` and `sig`. `sig` is `by`'s signature over the CBOR array `["aza auth v1", host, method, path with query, time, nonce, hash of the body]`. The header is about 4.6 KB. The node accepts it only if `host` is its own, `time` is within 5 minutes of its clock, it hasn't seen this `nonce` in that time, and `by` has permission after reading the newest log it holds:
+**Bodies.** Lists of changes, envelopes, profile records and key packages are CBOR arrays. `GET sync`, `GET records` and `GET inbox` return `{items, counter}`. `POST log` returns `{stored}`, the number of changes kept. `POST pairing` takes `{key, enc, label}` and returns `{url}`, and the reply is `{sealed}`. `PUT tags` takes `{app, current}`. `PUT registrations` takes the client's certificate. A blob is a CBOR byte string. An export is a map with `log`, `sync`, `envelopes`, `certificates`, `profiles`, `records`, `blobs` (`{hash, data}`), `tags` (`{tag, app, current, by}`), `registrations` (`{tag, certificate}`), `inbox` (`{box, item}`, `box` being a tag or `"requests"`) and `keypackages` (`{tag, client, package}`). An error is `{error}` with a message, under an HTTP status: 400 malformed, 401 `aza-auth` missing or invalid, 403 not allowed, 404 not found, 409 a version conflict or not the current secret, 413 over the node's limits.
+
+Requests that need permission carry an `aza-auth` header: the base64url encoding of a CBOR object with the identity ID, `by` (a device ID, or a client key fingerprint whose certificate the node already holds), `time` (Unix seconds), a random 16-byte `nonce` and `sig`. `sig` is `by`'s signature over the CBOR array `["aza auth v1", host, method, path with query (the full path, `/aza/v1/` included), time, nonce, hash of the body]`. The header is about 4.6 KB. The node accepts it only if `host` is its own, `time` is within 5 minutes of its clock, it hasn't seen this `nonce` in that time, and `by` has permission after reading the newest log it holds:
 
 - a device: it is current;
 - a client: at least one certificate the node holds for that client key passes all of these: its `identity` matches the path, its signing device is current, the client isn't revoked, it has the scope the request needs, and its `app` is the request's app. The request's app is the `{app}` in `sync` and `records` paths, and the app a tag is bound to in `inbox`, `keypackages` and `registrations` paths. For `envelopes`, `{holder}` must be the client's own fingerprint and the certificate needs `read` or `receive`. A revoked client can't make any request.
@@ -471,3 +480,57 @@ aiden, whose domain is `sidny.me`:
 8. **Plarza.** aiden signs in to Plarza with a certificate that has `sign-in` and `publish`. Each post is a public record on aiden's home node, and anyone can check it came from `@sidny.me`.
 9. **A friend joins.** aiden's friend signs up to Plarza with their email. Plarza's provider creates an identity with a hosted master and adds the friend's phone as a device. A year later the friend taps "take control" in the aza app; the provider hands off, and the friend now holds their own master, with the same identity ID and the same followers.
 10. **Messages.** A messenger on aiden's Mac gets a certificate with `receive` and its contact tag, and publishes key packages under that tag. A friend scans aiden's contact QR code, so the friend's messenger can work out the tag, fetch a key package, add aiden's Mac to an MLS group and leave the invitation in aiden's inbox. Someone who doesn't know aiden sends a contact request instead, and aiden accepts it in the aza app.
+
+## Implementation
+
+This repository implements everything above.
+
+| Crate | What it is |
+|---|---|
+| `crates/aza-core` | The Verus-verified core: deterministic CBOR and Ed25519's encoding rules (section 3), resolving and reading a change log (section 5.4), and endorsements with RFC 9162 Merkle trees (section 10). It takes no cryptographic decisions: callers pass in hashes, fingerprints and whether each signature is valid. |
+| `crates/aza` | Cryptography, every protocol object and the checks readers make, and the client library: the aza app (`aza_app`), app clients (`client`), apps checking sign-ins (`app`), hosted-master providers (`provider`) and an HTTP client for nodes (`node`). |
+| `crates/aza-node` | The node: every request of section 11.1 over HTTP, stored in SQLite. |
+| `crates/aza-swift`, `swift/`, `Package.swift` | `AzaKit`, the client library for iOS and macOS apps: Swift bindings (UniFFI) built into an XCFramework by `scripts/build-swift.sh`. `AzaClient` is one client of one app, `AzaDevice` the aza app's side, `AzaPairing` a new device joining. Apps add this repository as a Swift package; `scripts/release-swift.sh <version>` releases it. |
+| `tests` | End-to-end tests: real nodes on loopback ports, driven through the client library. |
+
+### Commands
+
+```sh
+cargo verus verify --manifest-path crates/aza-core/Cargo.toml   # needs Verus 0.2026.10.26 on PATH
+cargo test                                                     # every end-to-end test
+./scripts/build-swift.sh && swift test                         # AzaKit, then its end-to-end test (needs cargo build --release -p aza-node)
+cargo run -p aza-node -- --url https://node.example --listen 0.0.0.0:8080 --db aza-node.db
+```
+
+`aza-node` also takes `--min-work <bits>` (the admission price) and `--quota <bytes>` (storage per identity, never counting the change log).
+
+### What Verus proves
+
+Every function in `aza-core` is checked for every input: no indexing out of bounds, no arithmetic overflow, no panics, and every loop and recursion terminates. Beyond that, each module is proven against a specification written to read like the sections above:
+
+- **Reading a change log, section 5.4** (`spec.rs`, `log.rs`): for any log, `read` returns exactly what the spec defines: the master chain (with master conflicts), master changes, master removals, discarded changes, the reading order, every sign-out and revocation judged on its own, and the state after applying the log (current devices, handle, home node, current and announced secrets, unreadable logs). Lemmas prove the spec has one answer: only one reading order fits step 5's description and only one judgment fits step 4's.
+- **Ancestors** (`dag.rs`): computed exactly as the transitive `prev` relation, whatever order the changes arrive in. Changes on a cycle (which needs a SHA-256 collision) are exactly those outside the log proper.
+- **Reading order** (`order.rs`): every non-discarded change exactly once, each taken only once its non-discarded ancestors are, the smallest-hash ready change first.
+- **Resolving hashes** (`resolve.rs`): `prev`, `by`, `device` and `keep` become exactly the indices of the changes they name ("a change only counts as an ancestor if it is actually in the log"), and which key must have signed each change. The caller's sort orders are checked, not trusted.
+- **Endorsements, section 10** (`endorse.rs`): rules 3 and 4, deciding which changes may keep a record alive and whether its inclusion proofs satisfy them.
+- **Deterministic CBOR, section 3** (`cbor.rs`): `decode` returns a value only if it is canonical and its encoding is exactly the input, so every value has one byte form; UTF-8 is checked against RFC 3629's grammar.
+- **Ed25519's extra rules, section 3** (`ed25519.rs`): `S` < L, canonical `R` and `A` (RFC 8032 section 5.1.3), and `A` not of small order.
+- **Merkle trees** (`merkle.rs`): `root` and `path` equal RFC 9162's `MTH` and `PATH`.
+
+Cryptography comes from formally verified implementations: SHA-256, HKDF, Ed25519 and X25519 from HACL*, and ML-DSA-65 and ML-KEM-768 (inside X-Wing) from libcrux. HPKE is built on them in `aza::crypto` and checked against the `hpke` crate.
+
+Still trusted:
+- the HACL* and libcrux proofs, which are in F*, not Verus
+- RustCrypto's AES-256-GCM and Argon2id (no verified Rust Argon2id exists)
+- the float shortest-form check in CBOR (`float.rs`)
+- the table of eight small-order points, computed from curve25519-dalek's torsion subgroup
+- everything outside `aza-core`: parsing objects into fields, the client library, and the node's HTTP and storage code
+
+Not yet proven: that the decoder accepts every canonical encoding (it is proven never to accept a non-canonical one), and that the inclusion proofs `path` makes always verify.
+
+### Implementation choices
+
+Everything apps and other implementations depend on is in the sections above. These are this implementation's own choices:
+
+- ML-DSA-65 signs hedged, with fresh randomness, as FIPS 204 recommends.
+- The node keeps at most 100,000 changes per log and 10,000 inbox items per holder, and 1 MB of other data per identity unless `--quota` says otherwise.

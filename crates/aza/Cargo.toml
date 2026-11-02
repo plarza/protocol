@@ -1,0 +1,28 @@
+[package]
+name = "aza"
+description = "aza identity: protocol objects, checks, and the client library for the aza app, apps, clients, providers and nodes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes-gcm = "0.11"
+argon2 = "0.6"
+aza-core.workspace = true
+base64 = "0.22"
+getrandom = "0.4"
+hex = "0.4"
+libcrux-ed25519 = "0.0.10"
+libcrux-hkdf = "0.0.9"
+libcrux-kem = "0.0.10"
+libcrux-ml-dsa = "0.0.11"
+libcrux-ml-kem = "0.0.11"
+libcrux-sha2 = "0.0.9"
+libcrux-traits = "0.0.9"
+percent-encoding = "2"
+psl = "2"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+url = "2"

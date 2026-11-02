@@ -1,0 +1,22 @@
+[package]
+name = "aza-swift"
+description = "Swift bindings for the aza client library (UniFFI): the AzaKit package for iOS and macOS apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
+name = "aza_kit"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+aza.workspace = true
+hex = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+uniffi = { version = "0.32", features = ["cli", "tokio"] }

@@ -1,0 +1,31 @@
+name: CI
+
+# Runs on azalab-0 and only builds the node's image, which Flux deploys to node.aza.network.
+# Proofs, checks and tests run before a commit reaches main, from a clean checkout of it on the
+# machine that pushes it (scripts/verify.sh, run by .githooks/pre-push).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: host
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and publish
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          DOCKER_CONFIG="$(mktemp -d)"
+          export DOCKER_CONFIG
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          echo "$REGISTRY_TOKEN" | docker login git.aza.network --username aiden --password-stdin
+          image="git.aza.network/aza/aza-node:${GITHUB_REF_NAME}-${GITHUB_SHA::12}-${GITHUB_RUN_NUMBER}"
+          docker build --build-arg SOURCE_REV="$GITHUB_SHA" --tag "$image" .
+          docker push "$image"

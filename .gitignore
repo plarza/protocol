@@ -1,0 +1,7 @@
+/target
+.build/
+/swift/Generated
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

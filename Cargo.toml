@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/aza-core", "crates/aza", "crates/aza-node", "crates/aza-swift", "tests"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+aza-core = { path = "crates/aza-core" }
+aza = { path = "crates/aza" }
+aza-node = { path = "crates/aza-node" }
+vstd = "=0.0.0-2026-10-25-0158"
+verus_builtin = "=0.0.0-2026-10-11-0230"
+verus_builtin_macros = "=0.0.0-2026-10-25-0158"
+
+# Argon2id at 64 MiB and ML-DSA are unusable unoptimised; keep dependencies fast in debug builds.
+[profile.dev.package."*"]
+opt-level = 3
