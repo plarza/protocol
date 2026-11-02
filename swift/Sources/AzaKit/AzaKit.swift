@@ -1200,14 +1200,9 @@ public protocol AzaDeviceProtocol: AnyObject, Sendable {
     func approveUrl(url: String) async throws  -> String
     
     /**
-     * The master's keys as a password-protected backup file.
+     * The master's keys and its next key as one password-protected backup file.
      */
     func backupMaster(password: String) async throws  -> Data
-    
-    /**
-     * The master's next key as a separate backup file.
-     */
-    func backupNext(password: String) async throws  -> Data
     
     func contactRequests() async throws  -> [ContactRequestInfo]
     
@@ -1227,7 +1222,7 @@ public protocol AzaDeviceProtocol: AnyObject, Sendable {
     func devices() async  -> [DeviceInfo]
     
     /**
-     * Deletes the master's keys from this machine, once both backups are saved.
+     * Deletes the master's keys from this machine, once its backup file is saved.
      */
     func forgetMaster() async 
     
@@ -1247,6 +1242,10 @@ public protocol AzaDeviceProtocol: AnyObject, Sendable {
     
     func profile() async throws  -> ProfileInfo
     
+    /**
+     * Reads the newest log and keeps the identity in order (`upkeep`): after a device has
+     * signed itself out, its envelopes, tags and profile record are replaced.
+     */
     func refresh() async throws 
     
     /**
@@ -1326,8 +1325,7 @@ open class AzaDevice: AzaDeviceProtocol, @unchecked Sendable {
     
     /**
      * Creates an identity on `node` with a device for this machine called `label`. The master
-     * and its next key stay in this session until `backup_master`, `backup_next` and
-     * `forget_master`.
+     * and its next key stay in this session until `backup_master` and `forget_master`.
      */
 public static func create(node: String, label: String)async throws  -> AzaDevice  {
     return
@@ -1463,32 +1461,13 @@ open func approveUrl(url: String)async throws  -> String  {
 }
     
     /**
-     * The master's keys as a password-protected backup file.
+     * The master's keys and its next key as one password-protected backup file.
      */
 open func backupMaster(password: String)async throws  -> Data  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_aza_kit_fn_method_azadevice_backup_master(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(password)
-                )
-            },
-            pollFunc: ffi_aza_kit_rust_future_poll_rust_buffer,
-            completeFunc: ffi_aza_kit_rust_future_complete_rust_buffer,
-            freeFunc: ffi_aza_kit_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterData.lift,
-            errorHandler: FfiConverterTypeAzaError_lift
-        )
-}
-    
-    /**
-     * The master's next key as a separate backup file.
-     */
-open func backupNext(password: String)async throws  -> Data  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_aza_kit_fn_method_azadevice_backup_next(
                         self.uniffiCloneHandle(),FfiConverterString.lower(password)
                 )
             },
@@ -1584,7 +1563,7 @@ open func devices()async  -> [DeviceInfo]  {
 }
     
     /**
-     * Deletes the master's keys from this machine, once both backups are saved.
+     * Deletes the master's keys from this machine, once its backup file is saved.
      */
 open func forgetMaster()async   {
     return
@@ -1691,6 +1670,10 @@ open func profile()async throws  -> ProfileInfo  {
         )
 }
     
+    /**
+     * Reads the newest log and keeps the identity in order (`upkeep`): after a device has
+     * signed itself out, its envelopes, tags and profile record are replaced.
+     */
 open func refresh()async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -3094,10 +3077,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_aza_kit_checksum_method_azadevice_approve_url() != 49735) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aza_kit_checksum_method_azadevice_backup_master() != 12847) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_aza_kit_checksum_method_azadevice_backup_next() != 58586) {
+    if (uniffi_aza_kit_checksum_method_azadevice_backup_master() != 4758) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aza_kit_checksum_method_azadevice_contact_requests() != 43961) {
@@ -3115,7 +3095,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_aza_kit_checksum_method_azadevice_devices() != 14101) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aza_kit_checksum_method_azadevice_forget_master() != 35881) {
+    if (uniffi_aza_kit_checksum_method_azadevice_forget_master() != 3700) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aza_kit_checksum_method_azadevice_holds_master() != 44899) {
@@ -3133,7 +3113,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_aza_kit_checksum_method_azadevice_profile() != 30092) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aza_kit_checksum_method_azadevice_refresh() != 52767) {
+    if (uniffi_aza_kit_checksum_method_azadevice_refresh() != 8511) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aza_kit_checksum_method_azadevice_remove_device() != 27296) {
@@ -3169,7 +3149,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_aza_kit_checksum_constructor_azaclient_new() != 25224) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aza_kit_checksum_constructor_azadevice_create() != 58579) {
+    if (uniffi_aza_kit_checksum_constructor_azadevice_create() != 50372) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aza_kit_checksum_constructor_azadevice_load() != 61029) {
