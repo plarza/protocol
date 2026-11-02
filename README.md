@@ -22,7 +22,7 @@ Each of these is specified in detail later; this is just enough to read the rest
 - The **aza app** is aza's own app that holds devices and approves sign-ins.
 - A **node** is a server that stores identities and app data. Anyone can run one.
 - An identity's **home node** is the node it has chosen to store its data.
-- An **app** is any service people sign in to with an aza identity, such as Heavier or someone's video game.
+- An **app** is any service people sign in to with an aza identity, such as Coach or someone's video game.
 - A **client** is one program acting for an identity inside an app, like the iPhone version of a messenger. Clients get limited permission from a device and never hold a device key.
 - **Sync data** is an app's data, encrypted and stored on a node so its clients can share it.
 - **Public records** are an app's data that anyone can read, signed so it provably comes from the identity, such as posts.
@@ -214,7 +214,7 @@ A node keeps the newest profile record from each device, and a reader uses the o
 
 ## 7. Apps, clients and certificates
 
-An **app** is a service, named by a domain it controls: `heavier.aza.network`, `coolgame.com`. That domain is its **app ID**. The aza app's own app ID is `aza.network`.
+An **app** is a service, named by a domain it controls: `coach.aza.network`, `coolgame.com`. That domain is its **app ID**. The aza app's own app ID is `aza.network`.
 
 A **client** is one piece of software acting for an identity inside one app. The iPhone and Mac versions of a messenger are two clients of one app. Each client makes its own signing key pair, the **client key**, and, if it will read sync data, its own encryption key pair. Clients never see device keys.
 
@@ -329,7 +329,7 @@ Sync data is encrypted so that only the identity's devices and the clients it al
 ```json
 {
   "identity": "9f2c…",
-  "app": "heavier.aza.network",
+  "app": "coach.aza.network",
   "name": "workouts/2026-11-01",
   "version": 3,
   "secret": "<name of the data secret>",
@@ -477,7 +477,7 @@ aiden, whose domain is `sidny.me`:
 4. **Handle.** aiden adds `_aza.sidny.me TXT "aza=<identity ID> node=<aza node URL>"` and signs `set-handle` with `sidny.me`. Apps now show `@sidny.me`.
 5. **A game.** coolgame on the Mac asks to sign in with scope `sign-in` and a return URL on `coolgame.com`. The Mac's aza app shows the request, aiden approves, and the Mac signs a certificate and opens the return URL, which only the real coolgame can receive. coolgame's server fetches aiden's log, checks the certificate (section 7) and has the game sign a challenge. Nothing about coolgame appears in aiden's change log.
 6. **Stolen phone.** The Mac downloads the newest log and signs `sign-out` for the iPhone. Anything the thief did with the phone that the Mac hadn't seen is ignored, except sign-outs and revocations (section 5.4), and certificates the iPhone signed stop working. To make it final, and to undo anything the thief did, such as signing out the Mac, aiden opens the master's backup file in the aza app and removes the iPhone with the master, keeping its changes up to the last one aiden trusts. The aza app then replaces the data secret, so the phone can't read anything written after that, re-signs the profile with the Mac, and offers to replace the contact secret.
-7. **Offline apps.** Heavier works with none of this. Turning on aza sync makes Heavier ask for a certificate with `read` and `write`. It gets its app key from its envelope on aiden's home node, then uploads encrypted workouts there.
+7. **Offline apps.** Coach works with none of this. Turning on aza sync makes Coach ask for a certificate with `read` and `write`. It gets its app key from its envelope on aiden's home node, then uploads encrypted workouts there.
 8. **Plarza.** aiden signs in to Plarza with a certificate that has `sign-in` and `publish`. Each post is a public record on aiden's home node, and anyone can check it came from `@sidny.me`.
 9. **A friend joins.** aiden's friend signs up to Plarza with their email. Plarza's provider creates an identity with a hosted master and adds the friend's phone as a device. A year later the friend taps "take control" in the aza app; the provider hands off, and the friend now holds their own master, with the same identity ID and the same followers.
 10. **Messages.** A messenger on aiden's Mac gets a certificate with `receive` and its contact tag, and publishes key packages under that tag. A friend scans aiden's contact QR code, so the friend's messenger can work out the tag, fetch a key package, add aiden's Mac to an MLS group and leave the invitation in aiden's inbox. Someone who doesn't know aiden sends a contact request instead, and aiden accepts it in the aza app.

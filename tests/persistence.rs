@@ -8,23 +8,23 @@ async fn saved_state_survives_a_restart() {
     let node = aza_tests::node().await;
     let mut phone = AzaApp::create(&node, "iPhone", 6).await.unwrap();
     phone.set_name("aiden").await.unwrap();
-    let (mut heavier, req) =
-        Client::new("heavier.aza.network", &[SIGN_IN, READ, WRITE], "https://heavier.aza.network/aza").unwrap();
+    let (mut coach, req) =
+        Client::new("coach.aza.network", &[SIGN_IN, READ, WRITE], "https://coach.aza.network/aza").unwrap();
     let returned = phone.approve_url(&req.approve_url()).await.unwrap();
-    heavier.receive_certificate_url(&returned).await.unwrap();
-    heavier.write("workouts/2026-11-02", 1, b"bench 3x5").await.unwrap();
+    coach.receive_certificate_url(&returned).await.unwrap();
+    coach.write("workouts/2026-11-02", 1, b"bench 3x5").await.unwrap();
 
     // Both apps quit; only their saved bytes remain.
     let phone_saved = phone.save();
-    let heavier_saved = heavier.save();
+    let coach_saved = coach.save();
     let id = phone.identity;
-    drop((phone, heavier));
+    drop((phone, coach));
 
-    let mut heavier = Client::load(&heavier_saved).unwrap();
-    assert_eq!(heavier.identity().unwrap(), id);
-    assert!(heavier.log().is_some(), "the log is there offline");
-    assert_eq!(heavier.read_all().await.unwrap()[0].data, b"bench 3x5");
-    heavier.write("workouts/2026-11-02", 2, b"bench 3x5, rows 3x8").await.unwrap();
+    let mut coach = Client::load(&coach_saved).unwrap();
+    assert_eq!(coach.identity().unwrap(), id);
+    assert!(coach.log().is_some(), "the log is there offline");
+    assert_eq!(coach.read_all().await.unwrap()[0].data, b"bench 3x5");
+    coach.write("workouts/2026-11-02", 2, b"bench 3x5, rows 3x8").await.unwrap();
 
     let mut phone = AzaApp::load(&phone_saved).unwrap();
     assert_eq!(phone.identity, id);
@@ -35,10 +35,10 @@ async fn saved_state_survives_a_restart() {
     let (mut game, req) = Client::new("coolgame.com", &[SIGN_IN], "https://coolgame.com/aza").unwrap();
     game.receive_certificate_url(&phone.approve_url(&req.approve_url()).await.unwrap()).await.unwrap();
     phone.replace_data_secret().await.unwrap();
-    assert_eq!(heavier.read_all().await.unwrap()[0].data, b"bench 3x5, rows 3x8");
+    assert_eq!(coach.read_all().await.unwrap()[0].data, b"bench 3x5, rows 3x8");
 
     // A saved client that never got its certificate loads too, ready to finish signing in.
-    let (pending, _) = Client::new("heavier.aza.network", &[SIGN_IN], "https://heavier.aza.network/aza").unwrap();
+    let (pending, _) = Client::new("coach.aza.network", &[SIGN_IN], "https://coach.aza.network/aza").unwrap();
     let pending = Client::load(&pending.save()).unwrap();
     assert!(pending.certificate().is_none());
     assert!(Client::load(b"not a client").is_err());

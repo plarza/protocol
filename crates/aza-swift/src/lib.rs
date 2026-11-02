@@ -1,7 +1,7 @@
 //! Swift bindings for the aza client library. `scripts/build-swift.sh` builds them into the
 //! `AzaKit` package under `swift/`.
 //!
-//! - `AzaClient`: one client of one app, such as Heavier or Jarvis. Asks the aza app for a
+//! - `AzaClient`: one client of one app, such as Coach or Jarvis. Asks the aza app for a
 //!   certificate, signs in, and reads and writes the app's sync data, records and messages.
 //! - `AzaDevice`: the aza app's side, which holds a device's keys and approves requests.
 //! - `AzaPairing`: a new machine joining an identity.

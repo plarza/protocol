@@ -88,17 +88,16 @@ async fn walkthrough() {
     assert!(coolgame.check_sign_in(&cert, &c, &fake_proof).await.is_err());
     drop(impostor);
 
-    // 7. Offline apps: Heavier syncs encrypted workouts through the home node.
-    let (mut heavier, req) =
-        Client::new("heavier.aza.network", &[READ, WRITE], "https://heavier.aza.network/aza").unwrap();
+    // 7. Offline apps: Coach syncs encrypted workouts through the home node.
+    let (mut coach, req) = Client::new("coach.aza.network", &[READ, WRITE], "https://coach.aza.network/aza").unwrap();
     let returned = mac.approve_url(&req.approve_url()).await.unwrap();
-    heavier.receive_certificate_url(&returned).await.unwrap();
-    heavier.write("workouts/2026-11-01", 1, b"squats 5x5").await.unwrap();
-    let err = heavier.write("workouts/2026-11-01", 1, b"deadlifts").await.unwrap_err();
+    coach.receive_certificate_url(&returned).await.unwrap();
+    coach.write("workouts/2026-11-01", 1, b"squats 5x5").await.unwrap();
+    let err = coach.write("workouts/2026-11-01", 1, b"deadlifts").await.unwrap_err();
     assert!(matches!(err, Error::Node { status: 409, .. }), "two writers can't both succeed: {err:?}");
-    let v = heavier.update("workouts/2026-11-01", |old| [old.unwrap(), b", deadlifts 1x5"].concat()).await.unwrap();
+    let v = coach.update("workouts/2026-11-01", |old| [old.unwrap(), b", deadlifts 1x5"].concat()).await.unwrap();
     assert_eq!(v, 2);
-    let items = heavier.read_all().await.unwrap();
+    let items = coach.read_all().await.unwrap();
     assert_eq!(
         items,
         vec![client::Item {
@@ -111,7 +110,7 @@ async fn walkthrough() {
     let raw = nc
         .get_sync(
             &id,
-            "heavier.aza.network",
+            "coach.aza.network",
             0,
             &aza::node::Signer { identity: id, by: mac_id, key: mac.device().key.clone() },
         )
@@ -201,10 +200,10 @@ async fn walkthrough() {
     let new_secret = log.current_secret();
     assert_ne!(new_secret, secret_name, "removing a device replaces the data secret");
     assert!(phone.data_secret(&new_secret).await.is_err(), "the iPhone can't read the new data secret");
-    // Heavier's data was re-encrypted and is still readable.
-    let items = heavier.read_all().await.unwrap();
+    // Coach's data was re-encrypted and is still readable.
+    let items = coach.read_all().await.unwrap();
     assert_eq!(items[0].data, b"squats 5x5, deadlifts 1x5");
-    assert_eq!(heavier.refresh().await.unwrap().current_secret(), new_secret);
+    assert_eq!(coach.refresh().await.unwrap().current_secret(), new_secret);
     // Endorsed posts survive, the thief's don't, and the defaced post shows its earlier version.
     let posts = client::read_records(&node, &id, "plarza.com").await.unwrap();
     let live: Vec<(&str, String)> =
