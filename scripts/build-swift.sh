@@ -10,6 +10,7 @@ PROFILE=${PROFILE:-release}
 FLAG=$([[ $PROFILE == release ]] && echo --release || echo)
 TARGETS=(${=${ONLY:-aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin}})
 OUT=swift/Generated
+TARGET=${CARGO_TARGET_DIR:-target}
 
 export IPHONEOS_DEPLOYMENT_TARGET=26.0
 export MACOSX_DEPLOYMENT_TARGET=26.0
@@ -21,7 +22,7 @@ done
 cargo build $FLAG -p aza-swift --lib --target aarch64-apple-darwin
 rm -rf $OUT && mkdir -p $OUT/headers
 cargo run -q -p aza-swift --bin uniffi-bindgen -- generate \
-  --library target/aarch64-apple-darwin/$PROFILE/libaza_kit.dylib --language swift --out-dir $OUT/bindings
+  --library $TARGET/aarch64-apple-darwin/$PROFILE/libaza_kit.dylib --language swift --out-dir $OUT/bindings
 mv $OUT/bindings/aza_kitFFI.h $OUT/headers/
 cat > $OUT/headers/module.modulemap <<'M'
 module aza_kitFFI {
@@ -34,7 +35,7 @@ rm -rf $OUT/bindings
 
 ARGS=()
 for t in $TARGETS; do
-  ARGS+=(-library target/$t/$PROFILE/libaza_kit.a -headers $OUT/headers)
+  ARGS+=(-library $TARGET/$t/$PROFILE/libaza_kit.a -headers $OUT/headers)
 done
 xcodebuild -create-xcframework $ARGS -output $OUT/AzaKitFFI.xcframework >/dev/null
 rm -rf $OUT/headers
