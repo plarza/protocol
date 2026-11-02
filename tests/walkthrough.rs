@@ -28,9 +28,8 @@ async fn walkthrough() {
     assert!(log.is_current(&phone.device().id));
     assert_eq!(log.current_ordinary_devices().len(), 1);
 
-    // 2. Back up: the master's keys and its next key into two files, then off the iPhone.
+    // 2. Back up: the master's keys and its next key into one file, then off the iPhone.
     let master_file = phone.backup_master("correct horse").unwrap();
-    let next_file = phone.backup_next("battery staple").unwrap();
     phone.forget_master();
     assert!(!phone.holds_master());
     assert!(matches!(aza::backup::open(&master_file, "wrong"), Err(Error::BadPassword)));
@@ -281,6 +280,7 @@ async fn walkthrough() {
     assert_eq!(accepted, vec![(id, tag)]);
     assert!(mac.contact_requests().await.unwrap().is_empty());
 
-    // The next key's backup still opens: it is what hands the master role on.
-    mac.open_next(&next_file, "battery staple").await.unwrap();
+    // The backup file still opens, with the next key that hands the master role on.
+    mac.open_master(&master_file, "correct horse").await.unwrap();
+    assert!(mac.holds_master());
 }

@@ -149,7 +149,9 @@ pub fn choose<'a>(
     envelopes.iter().rev().find(|e| e.holder == *holder && e.kind == kind && e.secret == *secret && e.trusted(identity))
 }
 
-/// Opens the data secret `name` from the holder's envelopes, checking it against its `check`.
+/// Opens the data secret `name` from the holder's envelopes. Its `check` vouches for it, so an
+/// envelope from any of the identity's devices will do, even one no longer current: the newest
+/// whose secret matches.
 pub fn open_data_secret(
     envelopes: &[Envelope],
     identity: &Identity,
@@ -158,13 +160,15 @@ pub fn open_data_secret(
     name: &Hash,
 ) -> Result<Hash> {
     let check = identity.secret_check(name).ok_or(Error::NotFound("that data secret isn't announced".into()))?;
-    let env = choose(envelopes, identity, holder, Kind::DataSecret, name)
-        .ok_or(Error::NotFound("data secret envelope".into()))?;
-    let secret = env.open(key).ok_or(Error::Malformed("data secret envelope"))?;
-    if secret_check(&secret) != check {
-        return Err(Error::Refused("data secret doesn't match its check".into()));
-    }
-    Ok(secret)
+    envelopes
+        .iter()
+        .rev()
+        .filter(|e| {
+            e.holder == *holder && e.kind == Kind::DataSecret && e.secret == *name && e.signature_valid(identity)
+        })
+        .filter_map(|e| e.open(key))
+        .find(|s| secret_check(s) == check)
+        .ok_or(Error::NotFound("data secret envelope".into()))
 }
 
 /// Opens an app key from a client's envelopes. App keys can't be checked against `check`, so

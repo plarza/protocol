@@ -429,7 +429,7 @@ pub open spec fn judge_ok(cs: Seq<Change>, ch: ChainSpec, g: int, order: Seq<usi
     &&& cs[c].sig_ok
     &&& rule2(cs, ch, st, c)
     &&& match cs[c].body {
-        Body::SignOut { device: Some(a) } => cs[a as int].body is AddDevice && cur(st, a as int) && by_device(cs, c) != Some(a as int),
+        Body::SignOut { device: Some(a) } => cs[a as int].body is AddDevice && cur(st, a as int),
         Body::RevokeClient => true,
         _ => false,
     }

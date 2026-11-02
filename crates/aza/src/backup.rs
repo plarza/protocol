@@ -8,13 +8,14 @@ pub const MEMORY_KIB: u32 = 65536;
 pub const ITERATIONS: u32 = 3;
 pub const PARALLELISM: u32 = 1;
 
-/// What a backup file holds: a device's private keys, or a master's next key alone.
+/// What a backup file holds: a device's private keys and, for a master, its next key.
 #[derive(Clone, Debug)]
 pub struct Contents {
     pub identity: Hash,
     pub key: SigningKey,
-    /// `None` for a next key.
-    pub enc: Option<EncKey>,
+    pub enc: EncKey,
+    /// The master's next key, in a master's backup file.
+    pub next: Option<SigningKey>,
     pub node: String,
 }
 
@@ -23,10 +24,11 @@ impl Contents {
         let mut m: Vec<(&str, Value)> = vec![
             ("identity", self.identity.into()),
             ("key", self.key.secret().to_vec().into()),
+            ("enc", self.enc.secret().to_vec().into()),
             ("node", self.node.as_str().into()),
         ];
-        if let Some(enc) = &self.enc {
-            m.push(("enc", enc.secret().to_vec().into()));
+        if let Some(next) = &self.next {
+            m.push(("next", next.secret().to_vec().into()));
         }
         Value::map(m)
     }
@@ -35,9 +37,10 @@ impl Contents {
         Some(Contents {
             identity: v.get("identity")?.as_hash()?,
             key: SigningKey::from_bytes(v.get("key")?.as_bytes()?)?,
-            enc: match v.get("enc") {
+            enc: EncKey::from_bytes(v.get("enc")?.as_bytes()?)?,
+            next: match v.get("next") {
                 None => None,
-                Some(e) => Some(EncKey::from_bytes(e.as_bytes()?)?),
+                Some(n) => Some(SigningKey::from_bytes(n.as_bytes()?)?),
             },
             node: v.get("node")?.as_text()?.to_string(),
         })

@@ -411,3 +411,69 @@ async fn healthz_answers_outside_the_api() {
     let res = reqwest::get(format!("{node}/aza/v1/nothing")).await.unwrap();
     assert_eq!(res.status().as_u16(), 404);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_signs_itself_out_and_the_others_take_over() {
+    let node = aza_tests::node().await;
+    let mut phone = AzaApp::create(&node, "iPhone", 6).await.unwrap();
+    phone.set_name("aiden").await.unwrap();
+    let phone_id = phone.device().id;
+    // The Mac joins through the iPhone, so its envelope of the data secret is the iPhone's.
+    let pairing = Pairing::start(&node, "Mac").await.unwrap();
+    phone.approve_pairing(&pairing.qr).await.unwrap();
+    let mut mac = pairing.finish().await.unwrap().confirm();
+    mac.upkeep().await.unwrap();
+    let mut plarza = client(&mut phone, "plarza.com", &[SIGN_IN, PUBLISH]).await;
+    plarza.publish("posts/a", Some(Value::from("hello"))).await.unwrap();
+    let mut notes = client(&mut mac, "notes.example", &[READ, WRITE]).await;
+    notes.write("n", 1, b"kept").await.unwrap();
+
+    // With the master backed up and off it, the iPhone signs itself out, endorsing the posts
+    // made through its approvals.
+    phone.backup_master("pw").unwrap();
+    phone.forget_master();
+    phone.sign_out(&phone_id, Endorse::AllExcept(Vec::new())).await.unwrap();
+    let log = phone.refresh().await.unwrap().clone();
+    assert!(!log.is_current(&phone_id));
+    assert!(phone.set_name("gone").await.is_err(), "a signed-out device signs nothing more");
+    assert!(plarza.publish("posts/b", Some(Value::from("late"))).await.is_err(), "its approvals end");
+    let posts = client::read_records(&node, &mac.identity, "plarza.com").await.unwrap();
+    assert!(posts.iter().any(|r| r.name == "posts/a" && r.content.is_some()), "endorsed posts stay");
+
+    // The Mac notices on its next upkeep and takes over the iPhone's profile record and envelopes.
+    mac.upkeep().await.unwrap();
+    let profile = mac.profile().await.unwrap().unwrap();
+    assert_eq!(profile.name(), Some("aiden"));
+    assert_eq!(profile.by, mac.device().id);
+    let secret = mac.log().current_secret();
+    mac.data_secret(&secret).await.unwrap();
+    assert_eq!(notes.read_all().await.unwrap()[0].data, b"kept");
+    // And a fresh Mac session still opens the data secret.
+    let mut again = AzaApp::load(&mac.save()).unwrap();
+    again.refresh().await.unwrap();
+    again.data_secret(&secret).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_device_signs_out_and_its_backup_brings_everything_back() {
+    let node = aza_tests::node().await;
+    let mut phone = AzaApp::create(&node, "iPhone", 6).await.unwrap();
+    phone.set_name("aiden").await.unwrap();
+    let mut notes = client(&mut phone, "notes.example", &[READ, WRITE]).await;
+    notes.write("n", 1, b"kept").await.unwrap();
+    let file = phone.backup_master("pw").unwrap();
+    // Still holding the master, the iPhone signs itself out and hands its work to the master.
+    let phone_id = phone.device().id;
+    phone.sign_out(&phone_id, Endorse::AllExcept(Vec::new())).await.unwrap();
+    phone.forget_master();
+    assert!(phone.log().current_ordinary_devices().is_empty());
+
+    let mut restored = AzaApp::restore(&file, "pw", "new iPhone").await.unwrap();
+    assert_eq!(restored.profile().await.unwrap().unwrap().name(), Some("aiden"));
+    let secret = restored.log().current_secret();
+    restored.data_secret(&secret).await.unwrap();
+    // Approvals the iPhone signed ended with it; signing in again reads the same data.
+    assert!(notes.read_all().await.is_err());
+    let mut notes = client(&mut restored, "notes.example", &[READ, WRITE]).await;
+    assert_eq!(notes.read_all().await.unwrap()[0].data, b"kept");
+}

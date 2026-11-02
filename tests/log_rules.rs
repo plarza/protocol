@@ -22,8 +22,8 @@ struct Lab {
 impl Lab {
     async fn new(node: &str) -> Lab {
         let app = AzaApp::create(node, "A", 6).await.unwrap();
-        let master = backup::open(&app.backup_master("pw").unwrap(), "pw").unwrap().key;
-        let next = backup::open(&app.backup_next("pw").unwrap(), "pw").unwrap().key;
+        let file = backup::open(&app.backup_master("pw").unwrap(), "pw").unwrap();
+        let (master, next) = (file.key, file.next.unwrap());
         Lab {
             node: NodeClient::new(node).unwrap(),
             id: app.identity,
@@ -359,8 +359,7 @@ async fn only_the_master_announces_secrets_and_masters_are_never_signed_out() {
     let heads = lab.heads().await;
     let by_device = lab.sign(&lab.a.1, lab.a.0, heads.clone(), Body::NewSecret { check: [7; 32] });
     let out_master = lab.sign(&lab.a.1, lab.a.0, heads.clone(), Body::SignOut { device: lab.master_id, endorse: None });
-    let out_self = lab.sign(&lab.a.1, lab.a.0, heads.clone(), Body::SignOut { device: lab.a.0, endorse: None });
-    lab.post(&[by_device.clone(), out_master, out_self]).await;
+    lab.post(&[by_device.clone(), out_master]).await;
     let log = lab.log().await;
     assert_eq!(log.current_secret(), lab.id);
     assert!(log.master().unwrap().current);
@@ -370,6 +369,20 @@ async fn only_the_master_announces_secrets_and_masters_are_never_signed_out() {
     let log = lab.log().await;
     assert_eq!(log.current_secret(), by_master.hash());
     assert_eq!(log.announced_secrets(), vec![lab.id, by_master.hash()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_may_sign_itself_out() {
+    let node = aza_tests::node().await;
+    let lab = Lab::new(&node).await;
+    let out_self = lab.sign(&lab.a.1, lab.a.0, lab.heads().await, Body::SignOut { device: lab.a.0, endorse: None });
+    lab.post(&[out_self]).await;
+    let log = lab.log().await;
+    assert!(!log.is_current(&lab.a.0));
+    // Nothing it signs afterwards counts.
+    let late = lab.sign(&lab.a.1, lab.a.0, log.heads(), Body::SetHandle { handle: Some("late.example".into()) });
+    lab.post(&[late]).await;
+    assert_eq!(lab.log().await.handle(), None);
 }
 
 #[tokio::test(flavor = "multi_thread")]

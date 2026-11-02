@@ -1712,7 +1712,7 @@ fn judge(cs: &Vec<Change>, f: &Facts, genesis: usize) -> (judged: Vec<bool>)
                         Body::AddDevice { .. } => true,
                         _ => false,
                     };
-                    ordinary && st.current(a) && by != Some(a)
+                    ordinary && st.current(a)
                 },
                 Body::RevokeClient => true,
                 _ => false,

@@ -58,7 +58,7 @@ pub trait HandoffSigner {
 /// The outcome of taking control from a provider.
 #[derive(Debug)]
 pub struct TookControl {
-    /// The new master and next keys, to save into two backup files.
+    /// The new master and next keys, to save into one backup file.
     pub master: Keys,
     pub next: SigningKey,
     /// Approvals the provider's master had signed, which stopped working.
@@ -142,6 +142,9 @@ pub struct AzaApp {
     known_profile: Option<Profile>,
     /// The image of the picture in the profile this app uses, to upload again if it's missing.
     known_picture: Option<Vec<u8>>,
+    /// The devices that were current when this app last looked, to notice one that stops being
+    /// current (`upkeep`).
+    known_current: Vec<Hash>,
 }
 
 impl AzaApp {
@@ -156,6 +159,7 @@ impl AzaApp {
             secrets: HashMap::new(),
             known_profile: None,
             known_picture: None,
+            known_current: Vec::new(),
         })
     }
 
@@ -282,6 +286,7 @@ impl AzaApp {
         if let Some(p) = &self.known_picture {
             m.push(("picture", p.clone().into()));
         }
+        m.push(("current", Value::Array(self.known_current.iter().map(|d| (*d).into()).collect())));
         Value::map(m).to_bytes()
     }
 
@@ -326,6 +331,12 @@ impl AzaApp {
             Some(p) => Some(Profile::from_value(p.clone())?),
         };
         app.known_picture = v.get("picture").and_then(Value::as_bytes).map(<[u8]>::to_vec);
+        app.known_current = match v.get("current") {
+            None => app.log.current_devices().iter().map(|d| d.id).collect(),
+            Some(c) => {
+                c.as_array().ok_or_else(bad)?.iter().map(|d| d.as_hash().ok_or_else(bad)).collect::<Result<_>>()?
+            }
+        };
         Ok(app)
     }
 
@@ -399,25 +410,17 @@ impl AzaApp {
 
     // Backups.
 
-    /// The master's keys as a backup file.
+    /// The master's keys and its next key as one backup file.
     pub fn backup_master(&self, password: &str) -> Result<Vec<u8>> {
         let m = self.master_keys()?;
         backup::write(
             &Contents {
                 identity: self.identity,
                 key: m.key.clone(),
-                enc: Some(m.enc.clone()),
+                enc: m.enc.clone(),
+                next: self.next.clone(),
                 node: self.node.url.clone(),
             },
-            password,
-        )
-    }
-
-    /// The master's next key as a backup file, to keep apart from the master's.
-    pub fn backup_next(&self, password: &str) -> Result<Vec<u8>> {
-        let next = self.next.as_ref().ok_or(Error::Refused("this session doesn't hold the next key".into()))?;
-        backup::write(
-            &Contents { identity: self.identity, key: next.clone(), enc: None, node: self.node.url.clone() },
             password,
         )
     }
@@ -429,7 +432,8 @@ impl AzaApp {
             &Contents {
                 identity: self.identity,
                 key: d.key.clone(),
-                enc: Some(d.enc.clone()),
+                enc: d.enc.clone(),
+                next: None,
                 node: self.node.url.clone(),
             },
             password,
@@ -442,7 +446,7 @@ impl AzaApp {
         self.next = None;
     }
 
-    /// Opens the master's backup file for this session.
+    /// Opens the master's backup file for this session, with its next key.
     pub async fn open_master(&mut self, file: &[u8], password: &str) -> Result<()> {
         let c = backup::open(file, password)?;
         self.refresh().await?;
@@ -450,18 +454,8 @@ impl AzaApp {
         if c.identity != self.identity || master.key != c.key.public() {
             return Err(Error::Refused("that backup file isn't this identity's current master".into()));
         }
-        let enc = c.enc.ok_or(Error::Refused("that backup file holds a next key".into()))?;
-        self.master = Some(Keys { id: master.id, key: c.key, enc });
-        Ok(())
-    }
-
-    /// Opens a next key's backup file for this session.
-    pub async fn open_next(&mut self, file: &[u8], password: &str) -> Result<()> {
-        let c = backup::open(file, password)?;
-        if c.identity != self.identity || c.enc.is_some() {
-            return Err(Error::Refused("that backup file isn't this identity's next key".into()));
-        }
-        self.next = Some(c.key);
+        self.master = Some(Keys { id: master.id, key: c.key, enc: c.enc });
+        self.next = c.next;
         Ok(())
     }
 
@@ -475,13 +469,10 @@ impl AzaApp {
         if master.key != c.key.public() {
             return Err(Error::Refused("that backup file isn't the current master".into()));
         }
-        let mkeys = Keys {
-            id: master.id,
-            key: c.key,
-            enc: c.enc.ok_or(Error::Refused("that backup holds a next key".into()))?,
-        };
+        let mkeys = Keys { id: master.id, key: c.key, enc: c.enc };
         let mut app = AzaApp::with(c.identity, node, mkeys.clone(), log)?;
         app.master = Some(mkeys);
+        app.next = c.next;
         app.refresh().await?;
         let key = SigningKey::generate();
         let enc = EncKey::generate();
@@ -524,13 +515,50 @@ impl AzaApp {
 
     /// Signs out an ordinary device; everything it signed that this device hadn't seen stops
     /// counting. Its envelopes are replaced and its tags bound again.
+    ///
+    /// A device may sign itself out. It can't sign anything afterwards, so the other devices
+    /// replace its envelopes, tags and profile record when they next see the log (`upkeep`), and
+    /// this app should then delete its keys.
+    ///
+    /// While this session holds the master, a device signing itself out does that work itself,
+    /// as the master, so it can be the last device to leave and the master's backup file still
+    /// brings everything back.
     pub async fn sign_out(&mut self, device: &Hash, endorse: Endorse) -> Result<Change> {
         self.hold_secrets().await?;
+        let leaving = *device == self.device.id;
+        if leaving {
+            self.profile().await?;
+        }
         let (root, endorsement) = self.endorsement_for(device, &endorse).await?;
         let change = self.sign_change(Body::SignOut { device: *device, endorse: root }, false).await?;
         self.attach_endorsements(&change, endorsement).await?;
-        self.after_device_ended().await?;
+        if !leaving {
+            self.after_device_ended().await?;
+        } else if self.master.is_some() {
+            self.after_device_ended().await?;
+            self.keep_profile_current().await?;
+        }
         Ok(change)
+    }
+
+    /// Keeps this identity's shared state in order after changes other devices made: when a
+    /// device stopped being current since this app last looked (one that signed itself out, say),
+    /// writes envelopes again, binds tags again and signs the profile record again if it was
+    /// that device's. Run it after `refresh` from time to time.
+    pub async fn upkeep(&mut self) -> Result<()> {
+        self.refresh().await?;
+        if !self.log.is_current(&self.device.id) {
+            return Ok(());
+        }
+        // The profile record readers use now, to sign again should its device leave.
+        self.profile().await?;
+        let current: Vec<Hash> = self.log.current_devices().iter().map(|d| d.id).collect();
+        if self.known_current.iter().any(|d| !current.contains(d)) {
+            self.after_device_ended().await?;
+        }
+        self.keep_profile_current().await?;
+        self.known_current = current;
+        Ok(())
     }
 
     /// Removes an ordinary device for good with the master, keeping its changes up to `keep`,

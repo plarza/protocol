@@ -336,8 +336,7 @@ impl AzaDevice {
 #[uniffi::export(async_runtime = "tokio")]
 impl AzaDevice {
     /// Creates an identity on `node` with a device for this machine called `label`. The master
-    /// and its next key stay in this session until `backup_master`, `backup_next` and
-    /// `forget_master`.
+    /// and its next key stay in this session until `backup_master` and `forget_master`.
     #[uniffi::constructor]
     pub async fn create(node: String, label: String) -> R<Arc<Self>> {
         Ok(AzaDevice::wrap(AzaApp::create(&node, &label, aza::work::MIN_WORK).await?))
@@ -370,8 +369,10 @@ impl AzaDevice {
         self.inner.lock().await.holds_master()
     }
 
+    /// Reads the newest log and keeps the identity in order (`upkeep`): after a device has
+    /// signed itself out, its envelopes, tags and profile record are replaced.
     pub async fn refresh(&self) -> R<()> {
-        self.inner.lock().await.refresh().await?;
+        self.inner.lock().await.upkeep().await?;
         Ok(())
     }
 
@@ -470,17 +471,12 @@ impl AzaDevice {
         Ok(())
     }
 
-    /// The master's keys as a password-protected backup file.
+    /// The master's keys and its next key as one password-protected backup file.
     pub async fn backup_master(&self, password: String) -> R<Vec<u8>> {
         Ok(self.inner.lock().await.backup_master(&password)?)
     }
 
-    /// The master's next key as a separate backup file.
-    pub async fn backup_next(&self, password: String) -> R<Vec<u8>> {
-        Ok(self.inner.lock().await.backup_next(&password)?)
-    }
-
-    /// Deletes the master's keys from this machine, once both backups are saved.
+    /// Deletes the master's keys from this machine, once its backup file is saved.
     pub async fn forget_master(&self) {
         self.inner.lock().await.forget_master();
     }

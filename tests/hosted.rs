@@ -35,7 +35,7 @@ async fn taking_control_survives_a_provider_that_publishes_its_own_handoff() {
     let node = aza_tests::node().await;
     let mut hosted = AzaApp::create_hosted(&node, 6).await.unwrap();
     let id = hosted.identity;
-    let next = backup::open(&hosted.backup_next("pw").unwrap(), "pw").unwrap().key;
+    let next = backup::open(&hosted.backup_master("pw").unwrap(), "pw").unwrap().next.unwrap();
     let provider_master = hosted.log().master().unwrap().id;
 
     // The person logs in on a phone; the provider's master adds it and approves an app.

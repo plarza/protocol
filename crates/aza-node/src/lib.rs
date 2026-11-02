@@ -192,6 +192,17 @@ impl Node {
     }
 
     fn authenticate(&self, req: &Req, identity: &Identity, client_key: Option<&[u8]>) -> R<Principal> {
+        self.authenticate_as(req, identity, client_key, None)
+    }
+
+    /// As `authenticate`, but also admits the device `ended` though it is no longer current.
+    fn authenticate_as(
+        &self,
+        req: &Req,
+        identity: &Identity,
+        client_key: Option<&[u8]>,
+        ended: Option<&Hash>,
+    ) -> R<Principal> {
         let header = req.auth.as_deref().ok_or_else(|| Fail::Unauthorized("aza-auth header required".into()))?;
         let a = Auth::parse(header).map_err(|_| Fail::Unauthorized("malformed aza-auth header".into()))?;
         if a.identity != identity.id {
@@ -211,7 +222,7 @@ impl Node {
             if !verify(&device.key) {
                 return Err(Fail::Unauthorized("aza-auth signature".into()));
             }
-            if !device.current {
+            if !device.current && ended != Some(&a.by) {
                 return Err(forbidden("device isn't current"));
             }
             Principal::Device(a.by)
@@ -621,15 +632,18 @@ impl Node {
         Ok(Value::null())
     }
 
+    /// A device that signed itself out attaches its sign-out's proofs after it stopped being
+    /// current, so the device that signed the endorsing change may do so. The proof checks itself
+    /// against the change's root either way.
     fn put_endorsed(&self, id: &Hash, app: &str, name: &str, version: u64, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        Self::require_device(&self.authenticate(req, &identity, None)?)?;
-        let name = decode_name(name).ok_or_else(|| bad("record name"))?;
         let proof = InclusionProof::from_value(&req.value()?).map_err(|e| Fail::Bad(e.to_string()))?;
+        let change = identity.change(&proof.change).ok_or_else(|| Fail::Bad("unknown endorsing change".into()))?;
+        Self::require_device(&self.authenticate_as(req, &identity, None, change.by.as_ref())?)?;
+        let name = decode_name(name).ok_or_else(|| bad("record name"))?;
         let stored = self.store().record(id, app, &name, version)?.ok_or(Fail::NotFound)?;
         let record = Record::from_value(Value::from_bytes(&stored).ok_or_else(|| bad("stored record"))?)
             .map_err(|e| Fail::Bad(e.to_string()))?;
-        let change = identity.change(&proof.change).ok_or_else(|| Fail::Bad("unknown endorsing change".into()))?;
         let root = match &change.body {
             Body::SignOut { endorse: Some(r), .. }
             | Body::RemoveDevice { endorse: Some(r), .. }
