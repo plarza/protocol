@@ -12,6 +12,7 @@ use crate::message::{Acceptance, ContactRequest, InboxItem};
 use crate::node::{Inbox, NodeClient, PairingKeys, PairingReply, Signer};
 use crate::profile::{self, Picture, Profile};
 use crate::record::{Endorsement, Record};
+use crate::saved::{self, StorageKey};
 use crate::work::{MIN_WORK, work};
 use std::collections::{BTreeMap, HashMap};
 
@@ -250,8 +251,30 @@ impl AzaApp {
 
     /// Everything this aza app keeps between launches: the device's private keys, the master's
     /// and next key if this session holds them, the data secrets it has opened and the change
-    /// log. Store it somewhere only the aza app can read, such as the Keychain.
-    pub fn save(&self) -> Vec<u8> {
+    /// log, encrypted under `key`. Keep `key` apart from what it encrypts.
+    pub fn seal(&self, key: &StorageKey) -> Vec<u8> {
+        saved::seal(key, "aza saved app v1", &self.plain())
+    }
+
+    /// An aza app saved with `seal`. Works offline: the change log it kept is read again.
+    pub fn open(sealed: &[u8], key: &StorageKey) -> Result<AzaApp> {
+        AzaApp::from_plain(&saved::open(key, "aza saved app v1", sealed)?)
+    }
+
+    /// The same, unencrypted, only for the operating system's keychain, which keeps it where only
+    /// the aza app can read it. Never write it anywhere else.
+    #[cfg(feature = "keychain")]
+    pub fn save_for_keychain(&self) -> Vec<u8> {
+        self.plain()
+    }
+
+    /// An aza app saved with `save_for_keychain`.
+    #[cfg(feature = "keychain")]
+    pub fn load_from_keychain(bytes: &[u8]) -> Result<AzaApp> {
+        AzaApp::from_plain(bytes)
+    }
+
+    fn plain(&self) -> Vec<u8> {
         let keys = |k: &Keys| {
             Value::map([
                 ("id", k.id.into()),
@@ -290,8 +313,7 @@ impl AzaApp {
         Value::map(m).to_bytes()
     }
 
-    /// An aza app saved with `save`. Works offline: the change log it kept is read again.
-    pub fn load(bytes: &[u8]) -> Result<AzaApp> {
+    fn from_plain(bytes: &[u8]) -> Result<AzaApp> {
         let bad = || Error::Malformed("saved aza app");
         let v = Value::from_bytes(bytes).ok_or_else(bad)?;
         let keys = |k: &Value| -> Option<Keys> {

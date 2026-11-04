@@ -216,7 +216,7 @@ A node keeps the newest profile record from each device, and a reader uses the o
 
 An **app** is a service, named by a domain it controls: `coach.aza.network`, `coolgame.com`. That domain is its **app ID**. The aza app's own app ID is `aza.network`.
 
-A **client** is one piece of software acting for an identity inside one app. The iPhone and Mac versions of a messenger are two clients of one app. Each client makes its own signing key pair, the **client key**, and, if it will read sync data, its own encryption key pair. Clients never see device keys.
+A **client** is one piece of software acting for an identity inside one app. The iPhone and Mac versions of a messenger are two clients of one app. Each client makes its own signing key pair, the **client key**, and, if it will read sync data, its own encryption key pair. Clients never see device keys. A client keeps its private keys, and the app key and contact tags it opens, only where no other program can read them: on a phone or computer, the operating system's keychain for that app alone; on a server, encrypted under a key kept apart from the stored data, such as in the server's secret store. Never in a plain file, a database or a backup.
 
 A client gets permission through a **certificate**: a statement signed by a device, which the client keeps. It is not published in the change log, so the log doesn't reveal which apps an identity uses. The home node does see certificates, and public records show their app to anyone (section 10).
 
@@ -534,4 +534,5 @@ Not yet proven: that the decoder accepts every canonical encoding (it is proven 
 Everything apps and other implementations depend on is in the sections above. These are this implementation's own choices:
 
 - ML-DSA-65 signs hedged, with fresh randomness, as FIPS 204 recommends.
+- A saved client or aza app only leaves the library encrypted with AES-256-GCM under a `StorageKey` (`seal` and `open`). The unencrypted form, for the operating system's keychain, needs the `keychain` feature, which only AzaKit turns on.
 - The node keeps at most 100,000 changes per log and 10,000 inbox items per holder, and 100 MB of other data per identity unless `--quota` says otherwise.

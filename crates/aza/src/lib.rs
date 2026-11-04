@@ -20,6 +20,7 @@ pub mod message;
 pub mod node;
 pub mod profile;
 pub mod record;
+pub mod saved;
 pub mod work;
 
 pub use error::{Error, Result};

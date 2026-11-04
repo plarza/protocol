@@ -10,6 +10,7 @@ use crate::identity::Identity;
 use crate::message::{Acceptance, ContactRequest, Credential, InboxItem, KeyPackage};
 use crate::node::{Inbox, NodeClient, Signer};
 use crate::record::{self, Record};
+use crate::saved::{self, StorageKey};
 
 /// Fetches an identity's log starting from a node, then from the home node its latest `set-home`
 /// names, if different.
@@ -95,9 +96,31 @@ impl Client {
         self.key.fingerprint()
     }
 
-    /// Everything this client keeps between launches, its private keys included: store it
-    /// somewhere only this app can read, such as the Keychain.
-    pub fn save(&self) -> Vec<u8> {
+    /// Everything this client keeps between launches, its private keys and app key included,
+    /// encrypted under `key`. Keep `key` apart from what it encrypts.
+    pub fn seal(&self, key: &StorageKey) -> Vec<u8> {
+        saved::seal(key, "aza saved client v1", &self.plain())
+    }
+
+    /// A client saved with `seal`. Works offline: the change log it kept is read again.
+    pub fn open(sealed: &[u8], key: &StorageKey) -> Result<Client> {
+        Client::from_plain(&saved::open(key, "aza saved client v1", sealed)?)
+    }
+
+    /// The same, unencrypted, only for the operating system's keychain, which keeps it where only
+    /// this app can read it. Never write it anywhere else.
+    #[cfg(feature = "keychain")]
+    pub fn save_for_keychain(&self) -> Vec<u8> {
+        self.plain()
+    }
+
+    /// A client saved with `save_for_keychain`.
+    #[cfg(feature = "keychain")]
+    pub fn load_from_keychain(bytes: &[u8]) -> Result<Client> {
+        Client::from_plain(bytes)
+    }
+
+    fn plain(&self) -> Vec<u8> {
         let mut m: Vec<(&str, Value)> = vec![
             ("app", self.app.as_str().into()),
             ("key", self.key.secret().to_vec().into()),
@@ -133,8 +156,7 @@ impl Client {
         Value::map(m).to_bytes()
     }
 
-    /// A client saved with `save`. Works offline: the change log it kept is read again.
-    pub fn load(bytes: &[u8]) -> Result<Client> {
+    fn from_plain(bytes: &[u8]) -> Result<Client> {
         let bad = || Error::Malformed("saved client");
         let v = Value::from_bytes(bytes).ok_or_else(bad)?;
         let certificate = match v.get("certificate") {

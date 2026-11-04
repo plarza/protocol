@@ -449,7 +449,8 @@ async fn a_device_signs_itself_out_and_the_others_take_over() {
     mac.data_secret(&secret).await.unwrap();
     assert_eq!(notes.read_all().await.unwrap()[0].data, b"kept");
     // And a fresh Mac session still opens the data secret.
-    let mut again = AzaApp::load(&mac.save()).unwrap();
+    let key = aza::saved::StorageKey::generate();
+    let mut again = AzaApp::open(&mac.seal(&key), &key).unwrap();
     again.refresh().await.unwrap();
     again.data_secret(&secret).await.unwrap();
 }

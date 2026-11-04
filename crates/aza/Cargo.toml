@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Saved clients and aza apps unencrypted, for the operating system's keychain (AzaKit). Without it
+# they only come out encrypted under a StorageKey.
+keychain = []
+
 [dependencies]
 aes-gcm = "0.11"
 argon2 = "0.6"

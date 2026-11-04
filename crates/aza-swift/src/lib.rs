@@ -172,7 +172,7 @@ impl AzaClient {
     /// A client saved with `save`.
     #[uniffi::constructor]
     pub fn load(saved: Vec<u8>) -> R<Arc<Self>> {
-        Ok(Arc::new(AzaClient { inner: Mutex::new(Client::load(&saved)?), request_url: None }))
+        Ok(Arc::new(AzaClient { inner: Mutex::new(Client::load_from_keychain(&saved)?), request_url: None }))
     }
 
     /// `aza:approve#req=…`: open it so the aza app approves this client. Only on a new client.
@@ -181,7 +181,7 @@ impl AzaClient {
     }
 
     pub async fn save(&self) -> Vec<u8> {
-        self.inner.lock().await.save()
+        self.inner.lock().await.save_for_keychain()
     }
 
     pub async fn app(&self) -> String {
@@ -344,7 +344,7 @@ impl AzaDevice {
 
     #[uniffi::constructor]
     pub fn load(saved: Vec<u8>) -> R<Arc<Self>> {
-        Ok(AzaDevice::wrap(AzaApp::load(&saved)?))
+        Ok(AzaDevice::wrap(AzaApp::load_from_keychain(&saved)?))
     }
 
     /// Adds this machine as a new device by opening the master's backup file.
@@ -354,7 +354,7 @@ impl AzaDevice {
     }
 
     pub async fn save(&self) -> Vec<u8> {
-        self.inner.lock().await.save()
+        self.inner.lock().await.save_for_keychain()
     }
 
     pub async fn identity(&self) -> String {
