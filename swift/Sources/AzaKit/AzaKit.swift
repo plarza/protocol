@@ -723,15 +723,17 @@ open class AzaClient: AzaClientProtocol, @unchecked Sendable {
     /**
      * A new client of `app` asking for `scopes` (`sign-in`, `read`, `write`, `publish`,
      * `receive`). `return_url` must be `https://<app>/…` and a verified app link to this app.
+     * `label` names this machine for the aza app, such as "MacBook Pro".
      */
-public convenience init(app: String, scopes: [String], returnUrl: String)throws  {
+public convenience init(app: String, scopes: [String], returnUrl: String, label: String? = nil)throws  {
     let handle =
         try rustCallWithError(FfiConverterTypeAzaError_lift) {
         uniffiCallStatus in
     uniffi_aza_kit_fn_constructor_azaclient_new(
         FfiConverterString.lower(app),
         FfiConverterSequenceString.lower(scopes),
-        FfiConverterString.lower(returnUrl),uniffiCallStatus
+        FfiConverterString.lower(returnUrl),
+        FfiConverterOptionString.lower(label),uniffiCallStatus
     )
 }
     self.init(unsafeFromHandle: handle)
@@ -1182,6 +1184,10 @@ public protocol AzaDeviceProtocol: AnyObject, Sendable {
     
     func acceptContactRequest(item: String) async throws 
     
+    /**
+     * The approvals in effect: those whose approving device is still current and whose client
+     * hasn't been revoked.
+     */
     func approvals() async throws  -> [ApprovalInfo]
     
     /**
@@ -1205,6 +1211,11 @@ public protocol AzaDeviceProtocol: AnyObject, Sendable {
     func backupMaster(password: String) async throws  -> Data
     
     func contactRequests() async throws  -> [ContactRequestInfo]
+    
+    /**
+     * The label of the device a pairing QR code is from, to show before approving it.
+     */
+    func describePairing(qr: String) async throws  -> String
     
     /**
      * The app and scopes a request shown as a QR code on another machine asks for, to show
@@ -1387,6 +1398,10 @@ open func acceptContactRequest(item: String)async throws   {
         )
 }
     
+    /**
+     * The approvals in effect: those whose approving device is still current and whose client
+     * hasn't been revoked.
+     */
 open func approvals()async throws  -> [ApprovalInfo]  {
     return
         try  await uniffiRustCallAsync(
@@ -1491,6 +1506,25 @@ open func contactRequests()async throws  -> [ContactRequestInfo]  {
             completeFunc: ffi_aza_kit_rust_future_complete_rust_buffer,
             freeFunc: ffi_aza_kit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeContactRequestInfo.lift,
+            errorHandler: FfiConverterTypeAzaError_lift
+        )
+}
+    
+    /**
+     * The label of the device a pairing QR code is from, to show before approving it.
+     */
+open func describePairing(qr: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_aza_kit_fn_method_azadevice_describe_pairing(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(qr)
+                )
+            },
+            pollFunc: ffi_aza_kit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_aza_kit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_aza_kit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeAzaError_lift
         )
 }
@@ -2030,13 +2064,37 @@ public struct ApprovalInfo: Equatable, Hashable {
     public var app: String
     public var client: String
     public var scopes: [String]
+    /**
+     * The client's name for the machine it runs on, if its request gave one.
+     */
+    public var label: String?
+    /**
+     * When it was approved, in seconds since 1970; none while only asked for.
+     */
+    public var time: UInt64?
+    /**
+     * The device that approved it; none while only asked for.
+     */
+    public var by: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(app: String, client: String, scopes: [String]) {
+    public init(app: String, client: String, scopes: [String], 
+        /**
+         * The client's name for the machine it runs on, if its request gave one.
+         */label: String?, 
+        /**
+         * When it was approved, in seconds since 1970; none while only asked for.
+         */time: UInt64?, 
+        /**
+         * The device that approved it; none while only asked for.
+         */by: String?) {
         self.app = app
         self.client = client
         self.scopes = scopes
+        self.label = label
+        self.time = time
+        self.by = by
     }
 
     
@@ -2057,7 +2115,10 @@ public struct FfiConverterTypeApprovalInfo: FfiConverterRustBuffer {
             try ApprovalInfo(
                 app: FfiConverterString.read(from: &buf), 
                 client: FfiConverterString.read(from: &buf), 
-                scopes: FfiConverterSequenceString.read(from: &buf)
+                scopes: FfiConverterSequenceString.read(from: &buf), 
+                label: FfiConverterOptionString.read(from: &buf), 
+                time: FfiConverterOptionUInt64.read(from: &buf), 
+                by: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -2065,6 +2126,9 @@ public struct FfiConverterTypeApprovalInfo: FfiConverterRustBuffer {
         FfiConverterString.write(value.app, into: &buf)
         FfiConverterString.write(value.client, into: &buf)
         FfiConverterSequenceString.write(value.scopes, into: &buf)
+        FfiConverterOptionString.write(value.label, into: &buf)
+        FfiConverterOptionUInt64.write(value.time, into: &buf)
+        FfiConverterOptionString.write(value.by, into: &buf)
     }
 }
 
@@ -2673,6 +2737,30 @@ public func FfiConverterTypeAzaError_lower(_ value: AzaError) -> RustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -3065,7 +3153,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_aza_kit_checksum_method_azadevice_accept_contact_request() != 35489) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aza_kit_checksum_method_azadevice_approvals() != 12184) {
+    if (uniffi_aza_kit_checksum_method_azadevice_approvals() != 23146) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aza_kit_checksum_method_azadevice_approve_pairing() != 49726) {
@@ -3081,6 +3169,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aza_kit_checksum_method_azadevice_contact_requests() != 43961) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aza_kit_checksum_method_azadevice_describe_pairing() != 60698) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aza_kit_checksum_method_azadevice_describe_qr() != 48168) {
@@ -3146,7 +3237,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_aza_kit_checksum_constructor_azaclient_load() != 58512) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_aza_kit_checksum_constructor_azaclient_new() != 25224) {
+    if (uniffi_aza_kit_checksum_constructor_azaclient_new() != 39351) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aza_kit_checksum_constructor_azadevice_create() != 50372) {

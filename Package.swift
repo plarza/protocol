@@ -11,8 +11,8 @@ let ffi: Target = FileManager.default.fileExists(atPath: "\(Context.packageDirec
     ? .binaryTarget(name: "AzaKitFFI", path: local)
     : .binaryTarget(
         name: "AzaKitFFI",
-        url: "https://github.com/plarza/protocol/releases/download/0.2.0/AzaKitFFI.xcframework.zip",
-        checksum: "8f9367e48db207576c478a2d41f5b46b28bae9e54a79c1c3c8854938ed8bef1d"
+        url: "https://github.com/plarza/protocol/releases/download/0.3.0/AzaKitFFI.xcframework.zip",
+        checksum: "9732e4c83334fb641944db0099343b713f0fe1f332cec6e03e256fa1c8ca8f26"
     )
 
 let package = Package(
