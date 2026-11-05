@@ -214,6 +214,20 @@ pub struct Request {
     pub scopes: Vec<String>,
     /// Where the aza app sends the certificate: an `https` URL whose host is exactly the app ID.
     pub return_url: String,
+    /// The client's own name for the machine it runs on, such as "MacBook Pro", shown while
+    /// approving. Said by the client about itself, so it only helps the person recognise it.
+    pub label: Option<String>,
+}
+
+/// The longest client label, in characters.
+pub const MAX_LABEL: usize = 64;
+
+/// A label shown as a name: 1 to `MAX_LABEL` characters with no space at either end, and none of
+/// the control or direction-changing characters that could make it read as something else.
+pub fn is_label(l: &str) -> bool {
+    let bidi =
+        |c: char| matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    !l.is_empty() && l.trim() == l && l.chars().count() <= MAX_LABEL && !l.chars().any(|c| c.is_control() || bidi(c))
 }
 
 impl Request {
@@ -226,6 +240,9 @@ impl Request {
         ];
         if let Some(enc) = &self.enc {
             m.push(("enc", enc.clone().into()));
+        }
+        if let Some(label) = &self.label {
+            m.push(("label", label.as_str().into()));
         }
         Value::map(m)
     }
@@ -252,6 +269,10 @@ impl Request {
                 .map(|s| s.as_text().map(str::to_string).ok_or_else(bad))
                 .collect::<Result<_>>()?,
             return_url: v.get("return").and_then(Value::as_text).ok_or_else(bad)?.to_string(),
+            label: match v.get("label") {
+                None => None,
+                Some(l) => Some(l.as_text().ok_or_else(bad)?.to_string()),
+            },
         };
         Ok(r)
     }
@@ -271,6 +292,9 @@ impl Request {
         }
         if !scopes_ok(&self.scopes, &self.enc) || self.scopes.is_empty() {
             return Err(Error::Refused("scopes don't fit the certificate rules".into()));
+        }
+        if self.label.as_deref().is_some_and(|l| !is_label(l)) {
+            return Err(Error::Refused(format!("label isn't 1 to {MAX_LABEL} plain characters")));
         }
         Ok(())
     }

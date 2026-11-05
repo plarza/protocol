@@ -123,6 +123,23 @@ pub struct ApprovalInfo {
     pub app: String,
     pub client: String,
     pub scopes: Vec<String>,
+    /// The client's name for the machine it runs on, if its request gave one.
+    pub label: Option<String>,
+    /// When it was approved, in seconds since 1970; none while only asked for.
+    pub time: Option<u64>,
+    /// The device that approved it; none while only asked for.
+    pub by: Option<String>,
+}
+
+fn asked(r: aza::certificate::Request) -> ApprovalInfo {
+    ApprovalInfo {
+        app: r.app,
+        client: hex::encode(aza::crypto::fingerprint(&r.client)),
+        scopes: r.scopes,
+        label: r.label,
+        time: None,
+        by: None,
+    }
 }
 
 /// A contact request waiting for the person to accept or decline.
@@ -162,10 +179,11 @@ pub struct AzaClient {
 impl AzaClient {
     /// A new client of `app` asking for `scopes` (`sign-in`, `read`, `write`, `publish`,
     /// `receive`). `return_url` must be `https://<app>/…` and a verified app link to this app.
-    #[uniffi::constructor]
-    pub fn new(app: String, scopes: Vec<String>, return_url: String) -> R<Arc<Self>> {
+    /// `label` names this machine for the aza app, such as "MacBook Pro".
+    #[uniffi::constructor(default(label = None))]
+    pub fn new(app: String, scopes: Vec<String>, return_url: String, label: Option<String>) -> R<Arc<Self>> {
         let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
-        let (client, request) = Client::new(&app, &scopes, &return_url)?;
+        let (client, request) = Client::with_label(&app, &scopes, &return_url, label.as_deref())?;
         Ok(Arc::new(AzaClient { inner: Mutex::new(client), request_url: Some(request.approve_url()) }))
     }
 
@@ -391,7 +409,7 @@ impl AzaDevice {
     pub fn describe_request(&self, url: String) -> R<ApprovalInfo> {
         let r = aza::certificate::Request::from_approve_url(&url)?;
         r.validate()?;
-        Ok(ApprovalInfo { app: r.app, client: hex::encode(aza::crypto::fingerprint(&r.client)), scopes: r.scopes })
+        Ok(asked(r))
     }
 
     /// Approves `aza:approve#req=…`; returns the app's return URL with the certificate, to open.
@@ -404,7 +422,7 @@ impl AzaDevice {
     pub async fn describe_qr(&self, qr: String) -> R<ApprovalInfo> {
         let r = AzaApp::qr_request(&qr).await?;
         r.validate()?;
-        Ok(ApprovalInfo { app: r.app, client: hex::encode(aza::crypto::fingerprint(&r.client)), scopes: r.scopes })
+        Ok(asked(r))
     }
 
     /// Approves a request shown as a QR code on another machine.
@@ -413,21 +431,35 @@ impl AzaDevice {
         Ok(())
     }
 
+    /// The approvals in effect: those whose approving device is still current and whose client
+    /// hasn't been revoked.
     pub async fn approvals(&self) -> R<Vec<ApprovalInfo>> {
-        Ok(self
-            .inner
-            .lock()
-            .await
-            .approvals()
-            .await?
+        let mut app = self.inner.lock().await;
+        let list = app.approval_list().await?;
+        let log = app.log().clone();
+        Ok(list
             .into_iter()
-            .map(|c| ApprovalInfo { app: c.app.clone(), client: hex::encode(c.client_fp()), scopes: c.scopes.clone() })
+            .filter(|a| a.certificate.check(&log).is_ok())
+            .map(|a| ApprovalInfo {
+                app: a.certificate.app.clone(),
+                client: hex::encode(a.certificate.client_fp()),
+                scopes: a.certificate.scopes.clone(),
+                label: a.label,
+                time: Some(a.certificate.time),
+                by: Some(hex::encode(a.certificate.by)),
+            })
             .collect())
     }
 
     pub async fn revoke_client(&self, client: String) -> R<()> {
         self.inner.lock().await.revoke_client(&hex32(&client)?).await?;
         Ok(())
+    }
+
+    /// The label of the device a pairing QR code is from, to show before approving it.
+    pub async fn describe_pairing(&self, qr: String) -> R<String> {
+        let (url, hash) = aza::certificate::parse_qr_payload(&qr)?;
+        Ok(aza::node::NodeClient::fetch_pairing(&url, &hash).await?.label)
     }
 
     /// Approves a new device from its pairing QR code; returns its device ID.

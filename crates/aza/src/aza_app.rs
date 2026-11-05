@@ -20,6 +20,18 @@ use std::collections::{BTreeMap, HashMap};
 pub const MAX_APPROVALS: usize = 64;
 /// Sync item names the aza app keeps under its own app ID.
 const APPROVALS: &str = "approvals";
+
+/// The labels of approved clients' requests, by client fingerprint: kept beside the approvals,
+/// which stay plain certificates so every version of the aza app can read them.
+const APPROVAL_LABELS: &str = "approval-labels";
+
+/// A certificate in effect, and the label of the request it answered.
+#[derive(Clone, Debug)]
+pub struct Approval {
+    pub certificate: Certificate,
+    pub label: Option<String>,
+}
+
 const CONTACT: &str = "contact";
 
 /// A device's private keys and its device ID.
@@ -634,8 +646,8 @@ impl AzaApp {
 
     pub async fn revoke_client(&mut self, client: &Hash) -> Result<Change> {
         let change = self.sign_change(Body::RevokeClient { client: *client }, false).await?;
-        let approvals: Vec<Certificate> =
-            self.approvals().await?.into_iter().filter(|c| c.client_fp() != *client).collect();
+        let approvals: Vec<Approval> =
+            self.approval_list().await?.into_iter().filter(|a| a.certificate.client_fp() != *client).collect();
         self.save_approvals(&approvals).await?;
         Ok(change)
     }
@@ -826,21 +838,48 @@ impl AzaApp {
 
     /// The certificates in effect, shared by every device through the aza app's sync data.
     pub async fn approvals(&mut self) -> Result<Vec<Certificate>> {
-        match self.read_own(APPROVALS).await? {
-            None => Ok(Vec::new()),
+        Ok(self.approval_list().await?.into_iter().map(|a| a.certificate).collect())
+    }
+
+    /// The certificates in effect, each with the label its request carried.
+    pub async fn approval_list(&mut self) -> Result<Vec<Approval>> {
+        let certs = match self.read_own(APPROVALS).await? {
+            None => Vec::new(),
             Some((_, v)) => v
                 .as_array()
                 .ok_or(Error::Malformed("approvals"))?
                 .iter()
                 .map(|c| Certificate::from_value(c.clone()))
-                .collect(),
-        }
+                .collect::<Result<Vec<_>>>()?,
+        };
+        let labels = match self.read_own(APPROVAL_LABELS).await? {
+            Some((_, Value::Map(m))) => m,
+            _ => Vec::new(),
+        };
+        let label = |c: &Certificate| {
+            let fp = c.client_fp();
+            labels
+                .iter()
+                .find(|(k, _)| k.as_bytes() == Some(&fp[..]))
+                .and_then(|(_, v)| v.as_text())
+                .map(str::to_string)
+        };
+        Ok(certs.into_iter().map(|c| Approval { label: label(&c), certificate: c }).collect())
     }
 
-    async fn save_approvals(&mut self, certs: &[Certificate]) -> Result<()> {
+    async fn save_approvals(&mut self, approvals: &[Approval]) -> Result<()> {
         let version = self.read_own(APPROVALS).await?.map_or(0, |(v, _)| v);
-        let value = Value::Array(certs.iter().map(|c| c.to_value().clone()).collect());
-        self.write_own(APPROVALS, version + 1, &value).await
+        let certs = Value::Array(approvals.iter().map(|a| a.certificate.to_value().clone()).collect());
+        self.write_own(APPROVALS, version + 1, &certs).await?;
+        let version = self.read_own(APPROVAL_LABELS).await?.map_or(0, |(v, _)| v);
+        let labels = Value::Map(
+            approvals
+                .iter()
+                .filter_map(|a| Some((a.certificate.client_fp().to_vec().into(), a.label.as_deref()?.into())))
+                .collect(),
+        )
+        .sorted();
+        self.write_own(APPROVAL_LABELS, version + 1, &labels).await
     }
 
     /// Every contact secret with its generation, oldest first.
@@ -941,8 +980,8 @@ impl AzaApp {
         request.validate()?;
         self.refresh().await?;
         self.log.require_readable()?;
-        let mut approvals = self.approvals().await?;
-        approvals.retain(|c| c.check(&self.log).is_ok());
+        let mut approvals = self.approval_list().await?;
+        approvals.retain(|a| a.certificate.check(&self.log).is_ok());
         if approvals.len() >= MAX_APPROVALS {
             return Err(Error::Refused("64 approvals are already in effect".into()));
         }
@@ -956,7 +995,7 @@ impl AzaApp {
             scopes: request.scopes.clone(),
         };
         let cert = Certificate::sign(grant, now(), self.device.id, &self.device.key)?;
-        approvals.push(cert.clone());
+        approvals.push(Approval { certificate: cert.clone(), label: request.label.clone() });
         self.save_approvals(&approvals).await?;
         let mut secrets = Vec::new();
         for name in self.log.announced_secrets() {

@@ -246,7 +246,7 @@ A client gets permission through a **certificate**: a statement signed by a devi
 | `publish` | publishing public records for this app (section 10) |
 | `receive` | publishing key packages and reading inbox items for this app, under its contact tag (section 10). Needs the client's encryption key. |
 
-**Getting a certificate.** The client makes a **request**: a CBOR object holding its app ID, client key, encryption key (if asking for `read` or `receive`), the scopes it wants, and a **return URL**. The return URL must be an `https` URL whose host is exactly the app ID. The aza app refuses any request whose return URL isn't, because the return URL is how the aza app knows the certificate can only reach the real app:
+**Getting a certificate.** The client makes a **request**: a CBOR object holding its app ID, client key, encryption key (if asking for `read` or `receive`), the scopes it wants, a **return URL**, and optionally a **label**: the client's own name for the machine it runs on, such as `MacBook Pro`: 1 to 64 characters, with no space at either end and no control or direction-changing characters, so it can't read as something else. The aza app shows the label while approving and keeps it with the approval, so the person can tell their clients apart. The client says it about itself, so it's for recognising the client, never for trusting it. The return URL must be an `https` URL whose host is exactly the app ID. The aza app refuses any request whose return URL isn't, because the return URL is how the aza app knows the certificate can only reach the real app:
 
 - **On the same machine**, the client opens `aza:approve#req=` followed by the base64url-encoded CBOR request, which the operating system hands to the aza app. After approval, the aza app opens the return URL with `#aza=` and the base64url-encoded CBOR certificate appended. For a website, that loads the app's own site. For an iPhone, Mac or other native app, the return URL must be a verified app link (a [universal link](https://developer.apple.com/documentation/xcode/supporting-universal-links-in-your-app) on Apple platforms): the operating system only opens it in an app the domain itself lists, so a fake app never receives it.
 - **From another machine**, the request is too big for a QR code (keys alone are over 3 KB), so the app's server stores it at `https://<app ID>/.well-known/aza/request/<id>` and the client shows a QR code holding that URL and the request's hash. The aza app scans it, fetches the request, checks the hash, and after approval sends the CBOR certificate to the return URL with an HTTPS `POST`. The app's own server then hands it to the client that asked. Only the client that made a client key ever uploads that key's certificate to a node, and an app drops any certificate for a client key it didn't create, so a certificate that reaches the wrong place can't be put to use.
@@ -267,7 +267,15 @@ A client is **current** for an app while it holds a certificate for that app tha
 
 **Revoking.** A `revoke-client` change puts only the client key's fingerprint into the log, so it doesn't reveal which app the client belonged to.
 
-**The list of approvals.** The aza app keeps at most 64 certificates in effect per identity. It stores the list of them as its own sync data (section 9), so every device of the identity shows the same apps, clients and scopes, and any of them can revoke one.
+**The list of approvals.** The aza app keeps at most 64 certificates in effect per identity. It stores the list of them as its own sync data (section 9), so every device of the identity shows the same apps, clients and scopes, and any of them can revoke one. Beside it, a second item maps each client key's fingerprint to the label of the request it answered, if it had one.
+
+**App details.** An app may describe itself at `https://<app ID>/.well-known/aza/app`, as JSON:
+
+```json
+{ "name": "Coach", "icon": "https://coach.aza.network/.well-known/aza/icon.png" }
+```
+
+`name` is how the app calls itself, following the same rules as a label, and `icon` a square PNG or JPEG of at least 180 pixels on an `https` URL whose host is exactly the app ID. The aza app shows them while approving and in its list of apps, and falls back to the app ID and its first letter. Like a label, the name is the app's own claim, so the aza app always shows the app ID beside it.
 
 ## 8. Keeping the master
 

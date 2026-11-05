@@ -68,6 +68,11 @@ impl Client {
     /// Makes a client key (and an encryption key if the scopes need one) and the request for a
     /// certificate. `return_url` must be on `https://<app>`.
     pub fn new(app: &str, scopes: &[&str], return_url: &str) -> Result<(Client, Request)> {
+        Client::with_label(app, scopes, return_url, None)
+    }
+
+    /// `new`, with a name for this machine the aza app shows while approving (`Request::label`).
+    pub fn with_label(app: &str, scopes: &[&str], return_url: &str, label: Option<&str>) -> Result<(Client, Request)> {
         let key = SigningKey::generate();
         let needs_enc = scopes.iter().any(|s| *s == READ || *s == RECEIVE);
         let enc = needs_enc.then(EncKey::generate);
@@ -77,6 +82,7 @@ impl Client {
             enc: enc.as_ref().map(|e| e.public().to_vec()),
             scopes: scopes.iter().map(|s| s.to_string()).collect(),
             return_url: return_url.into(),
+            label: label.map(str::to_string),
         };
         request.validate()?;
         let client = Client {

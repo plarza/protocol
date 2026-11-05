@@ -38,3 +38,7 @@ path = "hosted.rs"
 [[test]]
 name = "persistence"
 path = "persistence.rs"
+
+[[test]]
+name = "approvals"
+path = "approvals.rs"
