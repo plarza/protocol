@@ -61,6 +61,11 @@ impl std::fmt::Debug for Value {
     }
 }
 
+/// A map's entries in deterministic order, as the verified `sort::sort_entries` picks them.
+fn in_order(entries: Vec<(Value, Value)>) -> Vec<(Value, Value)> {
+    crate::sort::sort_entries(&entries).into_iter().map(|i| entries[i].clone()).collect()
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -119,20 +124,13 @@ impl Value {
         Value::Map(entries.into_iter().map(|(k, v)| (Value::from(k.as_ref()), v)).collect()).sorted()
     }
 
-    /// Puts every map's entries in deterministic order, recursively.
+    /// Puts every map's entries in deterministic order, recursively: keys sorted by their
+    /// encodings, each key once with its first value (`sort::sort_entries`, verified).
     pub fn sorted(self) -> Value {
         match self {
             Value::Map(entries) => {
-                let mut keyed: Vec<(Vec<u8>, Value, Value)> = entries
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let k = k.sorted();
-                        (cbor::encode(&k), k, v.sorted())
-                    })
-                    .collect();
-                keyed.sort_by(|a, b| a.0.cmp(&b.0));
-                keyed.dedup_by(|a, b| a.0 == b.0);
-                Value::Map(keyed.into_iter().map(|(_, k, v)| (k, v)).collect())
+                let entries: Vec<(Value, Value)> = entries.into_iter().map(|(k, v)| (k.sorted(), v.sorted())).collect();
+                Value::Map(in_order(entries))
             }
             Value::Array(items) => Value::Array(items.into_iter().map(Value::sorted).collect()),
             Value::Tag(t, b) => Value::Tag(t, Box::new(b.sorted())),
@@ -193,12 +191,7 @@ impl Value {
 
     fn sorted_top(self) -> Value {
         match self {
-            Value::Map(entries) => {
-                let mut keyed: Vec<(Vec<u8>, Value, Value)> =
-                    entries.into_iter().map(|(k, v)| (cbor::encode(&k), k, v)).collect();
-                keyed.sort_by(|a, b| a.0.cmp(&b.0));
-                Value::Map(keyed.into_iter().map(|(_, k, v)| (k, v)).collect())
-            }
+            Value::Map(entries) => Value::Map(in_order(entries)),
             v => v,
         }
     }

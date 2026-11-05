@@ -3,8 +3,8 @@
 //! This crate holds the protocol objects and the checks every reader makes, and the client
 //! library: the aza app ([`aza_app`]), app clients ([`client`]), apps checking certificates
 //! ([`app`]), hosted-master providers ([`provider`]) and the HTTP client for nodes ([`node`]).
-//! Reading change logs, deterministic CBOR and Merkle trees come from the Verus-verified
-//! `aza-core`.
+//! Reading change logs, deterministic CBOR, Merkle trees, names in paths and proof of work come
+//! from the Verus-verified `aza-core`.
 pub use aza_core;
 pub use aza_core::cbor::Value;
 

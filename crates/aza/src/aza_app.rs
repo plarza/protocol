@@ -21,10 +21,6 @@ pub const MAX_APPROVALS: usize = 64;
 /// Sync item names the aza app keeps under its own app ID.
 const APPROVALS: &str = "approvals";
 
-/// The labels of approved clients' requests, by client fingerprint: kept beside the approvals,
-/// which stay plain certificates so every version of the aza app can read them.
-const APPROVAL_LABELS: &str = "approval-labels";
-
 /// A certificate in effect, and the label of the request it answered.
 #[derive(Clone, Debug)]
 pub struct Approval {
@@ -365,12 +361,13 @@ impl AzaApp {
             Some(p) => Some(Profile::from_value(p.clone())?),
         };
         app.known_picture = v.get("picture").and_then(Value::as_bytes).map(<[u8]>::to_vec);
-        app.known_current = match v.get("current") {
-            None => app.log.current_devices().iter().map(|d| d.id).collect(),
-            Some(c) => {
-                c.as_array().ok_or_else(bad)?.iter().map(|d| d.as_hash().ok_or_else(bad)).collect::<Result<_>>()?
-            }
-        };
+        app.known_current = v
+            .get("current")
+            .and_then(Value::as_array)
+            .ok_or_else(bad)?
+            .iter()
+            .map(|d| d.as_hash().ok_or_else(bad))
+            .collect::<Result<_>>()?;
         Ok(app)
     }
 
@@ -798,7 +795,7 @@ impl AzaApp {
     /// Re-encrypts every item of an app's sync data still under an older secret.
     async fn reencrypt(&mut self, app: &str, old: &HashMap<Hash, Hash>, name: &Hash, secret: &Hash) -> Result<()> {
         let page = self.node.get_sync(&self.identity, app, 0, &self.signer()).await?;
-        for item in latest(page.items) {
+        for item in SyncItem::latest(page.items) {
             if item.secret == *name {
                 continue;
             }
@@ -815,7 +812,7 @@ impl AzaApp {
 
     async fn read_own(&mut self, name: &str) -> Result<Option<(u64, Value)>> {
         let page = self.node.get_sync(&self.identity, AZA_APP, 0, &self.signer()).await?;
-        let Some(item) = latest(page.items).into_iter().find(|i| i.name == name) else { return Ok(None) };
+        let Some(item) = SyncItem::latest(page.items).into_iter().find(|i| i.name == name) else { return Ok(None) };
         let secret = self.data_secret(&item.secret).await?;
         let plain = item.open(&app_key(&secret, AZA_APP))?;
         Ok(Some((item.version, Value::from_bytes(&plain).ok_or(Error::Malformed("aza app sync item"))?)))
@@ -841,45 +838,41 @@ impl AzaApp {
         Ok(self.approval_list().await?.into_iter().map(|a| a.certificate).collect())
     }
 
-    /// The certificates in effect, each with the label its request carried.
+    /// The certificates in effect, each with the label its request carried: the `approvals`
+    /// item, a list of `{certificate, label}` (section 7).
     pub async fn approval_list(&mut self) -> Result<Vec<Approval>> {
-        let certs = match self.read_own(APPROVALS).await? {
-            None => Vec::new(),
-            Some((_, v)) => v
-                .as_array()
-                .ok_or(Error::Malformed("approvals"))?
-                .iter()
-                .map(|c| Certificate::from_value(c.clone()))
-                .collect::<Result<Vec<_>>>()?,
-        };
-        let labels = match self.read_own(APPROVAL_LABELS).await? {
-            Some((_, Value::Map(m))) => m,
-            _ => Vec::new(),
-        };
-        let label = |c: &Certificate| {
-            let fp = c.client_fp();
-            labels
-                .iter()
-                .find(|(k, _)| k.as_bytes() == Some(&fp[..]))
-                .and_then(|(_, v)| v.as_text())
-                .map(str::to_string)
-        };
-        Ok(certs.into_iter().map(|c| Approval { label: label(&c), certificate: c }).collect())
+        let Some((_, v)) = self.read_own(APPROVALS).await? else { return Ok(Vec::new()) };
+        let bad = || Error::Malformed("approvals");
+        v.as_array()
+            .ok_or_else(bad)?
+            .iter()
+            .map(|a| {
+                Ok(Approval {
+                    certificate: Certificate::from_value(a.get("certificate").ok_or_else(bad)?.clone())?,
+                    label: match a.get("label") {
+                        None => None,
+                        Some(l) => Some(l.as_text().ok_or_else(bad)?.to_string()),
+                    },
+                })
+            })
+            .collect()
     }
 
     async fn save_approvals(&mut self, approvals: &[Approval]) -> Result<()> {
         let version = self.read_own(APPROVALS).await?.map_or(0, |(v, _)| v);
-        let certs = Value::Array(approvals.iter().map(|a| a.certificate.to_value().clone()).collect());
-        self.write_own(APPROVALS, version + 1, &certs).await?;
-        let version = self.read_own(APPROVAL_LABELS).await?.map_or(0, |(v, _)| v);
-        let labels = Value::Map(
+        let list = Value::Array(
             approvals
                 .iter()
-                .filter_map(|a| Some((a.certificate.client_fp().to_vec().into(), a.label.as_deref()?.into())))
+                .map(|a| {
+                    let mut m = vec![("certificate", a.certificate.to_value().clone())];
+                    if let Some(l) = &a.label {
+                        m.push(("label", l.as_str().into()));
+                    }
+                    Value::map(m)
+                })
                 .collect(),
-        )
-        .sorted();
-        self.write_own(APPROVAL_LABELS, version + 1, &labels).await
+        );
+        self.write_own(APPROVALS, version + 1, &list).await
     }
 
     /// Every contact secret with its generation, oldest first.
@@ -1234,7 +1227,7 @@ impl AzaApp {
         };
         let change = unsigned.sign(&next);
         self.upload(std::slice::from_ref(&change)).await?;
-        let master = Keys { id: change.device_id(), key, enc };
+        let master = Keys { id: change.hash(), key, enc };
         if self.log.master().map(|m| m.id) != Some(master.id) {
             return Err(Error::Conflict(
                 "the handoff didn't become the next link; was the next key used before?".into(),
@@ -1299,7 +1292,7 @@ impl AzaApp {
         let master = Keys { id: link.id, key, enc };
         self.master = Some(master.clone());
         self.next = Some(new_next.clone());
-        let differing = if link.id == change.device_id() {
+        let differing = if link.id == change.hash() {
             Vec::new()
         } else {
             self.differing_master_changes(&provider_master, &unsigned.prev, &link.id)
@@ -1356,7 +1349,7 @@ impl AzaApp {
     /// the one asked for: left out of its ancestors, or slipped in.
     fn differing_master_changes(&self, old_master: &Hash, asked_prev: &[Hash], link: &Hash) -> Vec<Hash> {
         let in_asked = |h: &Hash| asked_prev.iter().any(|p| p == h || self.log.is_ancestor(h, p));
-        let link_change = self.log.changes().iter().find(|c| c.device_id() == *link).map(Change::hash);
+        let link_change = self.log.changes().iter().find(|c| c.hash() == *link).map(Change::hash);
         let in_link = |h: &Hash| link_change.is_some_and(|l| self.log.is_ancestor(h, &l));
         self.log
             .changes()
@@ -1445,15 +1438,4 @@ impl AzaApp {
     pub async fn decline_contact_request(&mut self, item: &Hash) -> Result<()> {
         self.node.delete_inbox(&self.identity, Inbox::Requests, &self.device.id, item, &self.signer()).await
     }
-}
-
-/// Keeps only the newest version of each item name.
-pub(crate) fn latest(items: Vec<SyncItem>) -> Vec<SyncItem> {
-    let mut best: BTreeMap<String, SyncItem> = BTreeMap::new();
-    for i in items {
-        if best.get(&i.name).is_none_or(|b| b.version < i.version) {
-            best.insert(i.name.clone(), i);
-        }
-    }
-    best.into_values().collect()
 }

@@ -50,6 +50,22 @@ impl Lab {
         self.node.post_log(&self.id, changes).await.unwrap();
     }
 
+    /// The node refuses these changes (section 11's limits on a change log).
+    async fn refused(&self, changes: &[Change]) {
+        match self.node.post_log(&self.id, changes).await {
+            Err(Error::Node { status: 413, .. }) => {}
+            r => panic!("expected the node to refuse, got {r:?}"),
+        }
+    }
+
+    /// The log as a reader reads it with `extra` changes added: for reading rules about changes
+    /// a node refuses to store.
+    async fn read_with(&self, extra: &[Change]) -> Identity {
+        let mut changes = self.node.get_log(&self.id).await.unwrap();
+        changes.extend(extra.iter().cloned());
+        Identity::read(self.id, changes).unwrap()
+    }
+
     /// Adds an ordinary device, signed by `by`.
     async fn add(&self, key: &SigningKey, by: Hash, prev: Vec<Hash>, label: &str) -> (Hash, SigningKey) {
         let k = SigningKey::generate();
@@ -93,8 +109,10 @@ async fn a_signed_out_device_s_unseen_work_is_ignored() {
     let b_adds_c = lab.sign(&bk, b, base.clone(), add_body(&c_key, "C"));
     let c_handle = lab.sign(&c_key, b_adds_c.hash(), vec![b_adds_c.hash()], handle("example.org"));
     let a_out_b = lab.sign(&lab.a.1, lab.a.0, base.clone(), Body::SignOut { device: b, endorse: None });
-    lab.post(&[b_handle.clone(), b_adds_c.clone(), c_handle, a_out_b]).await;
-    let log = lab.log().await;
+    lab.post(&[b_handle.clone(), a_out_b]).await;
+    // A node refuses B's addition of C, which wouldn't be applied; a reader ignores it anyway.
+    lab.refused(std::slice::from_ref(&b_adds_c)).await;
+    let log = lab.read_with(&[b_adds_c.clone(), c_handle]).await;
     assert!(!log.is_current(&b));
     assert!(!log.is_current(&b_adds_c.hash()), "a device B added after A's view is ignored");
     assert_eq!(log.handle(), None);
@@ -192,7 +210,7 @@ async fn the_next_key_hands_off_and_disowns_a_stolen_master_key() {
     .sign(&lab.next);
     lab.post(std::slice::from_ref(&handoff)).await;
     let log = lab.log().await;
-    assert_eq!(log.master().unwrap().id, handoff.device_id());
+    assert_eq!(log.master().unwrap().id, handoff.hash());
     assert!(log.is_current(&lab.a.0), "the stolen key's removal stops counting");
     assert!(!log.is_current(&t), "and so does the thief's device");
     assert!(log.is_discarded(&thief_removal.hash()));
@@ -205,7 +223,7 @@ async fn the_next_key_hands_off_and_disowns_a_stolen_master_key() {
     assert!(log.is_current(&b));
     assert!(log.is_discarded(&late.hash()));
     // The new master can make repairs.
-    let m_id = handoff.device_id();
+    let m_id = handoff.hash();
     let removal = lab.sign(&new_master, m_id, log.heads(), Body::RemoveDevice { device: b, keep: None, endorse: None });
     lab.post(&[removal]).await;
     assert!(!lab.log().await.is_current(&b));
@@ -218,7 +236,7 @@ async fn the_next_key_hands_off_and_disowns_a_stolen_master_key() {
         body: handoff.body.clone(),
     }
     .sign(&lab.next);
-    assert_eq!(copy.device_id(), handoff.device_id());
+    assert_eq!(copy.hash(), handoff.hash());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -273,15 +291,17 @@ async fn sixty_four_ordinary_devices_at_most() {
     }
     lab.post(&batch).await;
     assert_eq!(lab.log().await.current_ordinary_devices().len(), 64);
-    let (extra, _) = lab.add(&lab.a.1, lab.a.0, lab.heads().await, "one too many").await;
-    let log = lab.log().await;
-    assert!(!log.is_current(&extra));
+    let extra = lab.sign(&lab.a.1, lab.a.0, lab.heads().await, add_body(&SigningKey::generate(), "one too many"));
+    lab.refused(std::slice::from_ref(&extra)).await;
+    let log = lab.read_with(std::slice::from_ref(&extra)).await;
+    assert!(!log.is_current(&extra.hash()));
     assert_eq!(log.current_ordinary_devices().len(), 64);
     // Signed-out devices still count until the master removes them.
     let out = lab.sign(&lab.a.1, lab.a.0, log.heads(), Body::SignOut { device: batch[0].hash(), endorse: None });
     lab.post(&[out]).await;
-    let (still, _) = lab.add(&lab.a.1, lab.a.0, lab.heads().await, "still too many").await;
-    assert!(!lab.log().await.is_current(&still));
+    let still = lab.sign(&lab.a.1, lab.a.0, lab.heads().await, add_body(&SigningKey::generate(), "still too many"));
+    lab.refused(std::slice::from_ref(&still)).await;
+    assert!(!lab.read_with(std::slice::from_ref(&still)).await.is_current(&still.hash()));
     let removal = lab.sign(
         &lab.master,
         lab.master_id,
@@ -328,9 +348,10 @@ async fn keys_are_never_reused() {
             label: "again".into(),
         },
     );
-    lab.post(&[with_master_key.clone(), with_next_key.clone(), with_own_key.clone()]).await;
-    let log = lab.log().await;
-    for c in [&with_master_key, &with_next_key, &with_own_key] {
+    let reused = [with_master_key, with_next_key, with_own_key];
+    lab.refused(&reused).await;
+    let log = lab.read_with(&reused).await;
+    for c in &reused {
         assert!(!log.is_current(&c.hash()));
     }
     // A handoff whose new key is an old one isn't a link.
@@ -494,4 +515,75 @@ async fn reqwest_post(url: &str, body: Vec<u8>) -> u16 {
     stream.read_to_end(&mut buf).await.unwrap();
     out.push_str(&String::from_utf8_lossy(&buf));
     out.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copies_differing_only_in_signature_are_one_change() {
+    let node = aza_tests::node().await;
+    let lab = Lab::new(&node).await;
+    let unsigned = Unsigned {
+        identity: Some(lab.id),
+        prev: lab.heads().await,
+        time: now(),
+        by: Some(lab.a.0),
+        body: Body::SetHome { node: node.clone() },
+    };
+    // ML-DSA signs with fresh randomness, so the two copies' bytes differ.
+    let (first, second) = (unsigned.clone().sign(&lab.a.1), unsigned.sign(&lab.a.1));
+    assert_ne!(first.to_bytes(), second.to_bytes());
+    assert_eq!(first.hash(), second.hash());
+    let before = lab.node.get_log(&lab.id).await.unwrap().len();
+    lab.post(&[first.clone(), second]).await;
+    assert_eq!(lab.node.get_log(&lab.id).await.unwrap().len(), before + 1);
+    // A copy with a broken signature never displaces a valid one.
+    let mut changes = lab.node.get_log(&lab.id).await.unwrap();
+    let forged = Change::from_value(first.to_value().with("sig", vec![0u8; 3373].into())).unwrap();
+    changes.insert(0, forged);
+    let log = Identity::read(lab.id, changes).unwrap();
+    assert!(log.is_applied(&first.hash()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strangers_cannot_fill_a_log_with_handoffs_of_their_own() {
+    let node = aza_tests::node().await;
+    let lab = Lab::new(&node).await;
+    // Anyone can sign a set-master with a key of their own, but it reveals no link's next key.
+    let stranger = SigningKey::generate();
+    let junk = Unsigned {
+        identity: Some(lab.id),
+        prev: lab.heads().await,
+        time: now(),
+        by: None,
+        body: Body::SetMaster {
+            reveal: stranger.public().to_vec(),
+            key: SigningKey::generate().public().to_vec(),
+            enc: EncKey::generate().public().to_vec(),
+            next: fingerprint(SigningKey::generate().public()),
+            endorse: None,
+        },
+    }
+    .sign(&stranger);
+    lab.refused(&[junk]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thief_s_device_runs_out_of_changes_but_can_still_be_signed_out() {
+    let node = aza_tests::node().await;
+    let lab = Lab::new(&node).await;
+    let (b, bk) = lab.add(&lab.a.1, lab.a.0, lab.heads().await, "stolen").await;
+    let base = lab.heads().await;
+    let before = lab.node.get_log(&lab.id).await.unwrap().len();
+    let spam: Vec<Change> = (0..aza::aza_core::admit::ALLOWANCE + 2)
+        .map(|i: u64| {
+            let mut client = [0u8; 32];
+            client[..8].copy_from_slice(&i.to_be_bytes());
+            lab.sign(&bk, b, base.clone(), Body::RevokeClient { client })
+        })
+        .collect();
+    lab.refused(&spam).await;
+    let held = lab.node.get_log(&lab.id).await.unwrap().len();
+    assert_eq!(held, before + aza::aza_core::admit::ALLOWANCE as usize, "the node keeps B's allowance and no more");
+    // The thief's allowance is spent, but A's isn't: A signs B out.
+    lab.post(&[lab.sign(&lab.a.1, lab.a.0, lab.heads().await, Body::SignOut { device: b, endorse: None })]).await;
+    assert!(!lab.log().await.is_current(&b));
 }

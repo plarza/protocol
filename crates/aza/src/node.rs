@@ -11,8 +11,6 @@ use crate::profile::Profile;
 use crate::record::{InclusionProof, Record};
 
 pub const API: &str = "/aza/v1/";
-/// How far an `aza-auth` header's `time` may be from the node's clock.
-pub const AUTH_WINDOW: u64 = 300;
 
 /// Whether `s` is a node URL: `https` with a host, or `http` on a loopback host for local
 /// testing, with no path, query or fragment.
@@ -39,28 +37,25 @@ pub fn host_of(node: &str) -> Result<String> {
     })
 }
 
-/// An item `name` as a single path segment: every character other than letters, digits, `-`,
-/// `.`, `_` and `~` percent-encoded.
+/// An item `name` as a single path segment: every byte other than letters, digits, `-`, `.`,
+/// `_` and `~` percent-encoded (verified in `aza_core::names`).
 pub fn encode_name(name: &str) -> String {
-    const SET: &percent_encoding::AsciiSet =
-        &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
-    percent_encoding::utf8_percent_encode(name, SET).to_string()
+    String::from_utf8(aza_core::names::encode_name(name.as_bytes())).expect("percent-encoding is ASCII")
 }
 
+/// The name a path segment encodes, only if `segment` is exactly its `encode_name`.
 pub fn decode_name(segment: &str) -> Option<String> {
-    let s = percent_encoding::percent_decode_str(segment).decode_utf8().ok()?.into_owned();
-    (encode_name(&s) == segment).then_some(s)
+    String::from_utf8(aza_core::names::decode_name(segment.as_bytes())?).ok()
 }
 
+/// A hash as lowercase hex.
 pub fn hex32(h: &Hash) -> String {
-    hex::encode(h)
+    String::from_utf8(aza_core::names::encode_hex(h)).expect("hex is ASCII")
 }
 
+/// The hash whose lowercase hex is `s` (verified in `aza_core::names`).
 pub fn parse_hex32(s: &str) -> Option<Hash> {
-    if s.len() != 64 || s.bytes().any(|b| b.is_ascii_uppercase()) {
-        return None;
-    }
-    hex::decode(s).ok()?.try_into().ok()
+    aza_core::names::decode_hex32(s.as_bytes())
 }
 
 /// Who signs a request: a device, or a client by its key fingerprint.

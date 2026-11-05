@@ -2,7 +2,7 @@
 //! certificates, and checking sign-ins (section 7).
 use crate::certificate::{self, Certificate, Request};
 use crate::client::fetch_identity;
-use crate::crypto::{self, Hash};
+use crate::crypto;
 use crate::error::{Error, Result};
 use crate::identity::Identity;
 use std::collections::{HashMap, HashSet};
@@ -93,16 +93,4 @@ impl App {
         cert.check_sign_in(&log, &self.id, challenge, proof)?;
         Ok(log)
     }
-}
-
-/// Checks a sign-in with a log the caller already has.
-pub fn check_sign_in_with(
-    log: &Identity,
-    app: &str,
-    cert: &Certificate,
-    challenge: &[u8; 32],
-    proof: &[u8],
-) -> Result<Hash> {
-    cert.check_sign_in(log, app, challenge, proof)?;
-    Ok(log.id)
 }

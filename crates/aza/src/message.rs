@@ -1,6 +1,7 @@
 //! Messages, section 10: inbox items, contact requests, acceptances and key packages.
 use crate::Value;
 use crate::certificate::{Certificate, RECEIVE};
+use crate::change::CLOCK_SKEW;
 use crate::crypto::{self, Hash, SigningKey};
 use crate::error::{Error, Result};
 use crate::identity::Identity;
@@ -120,7 +121,7 @@ impl ContactRequest {
         if self.recipient != *recipient {
             return Err(Error::Refused("contact request is for someone else".into()));
         }
-        if self.time > now + 300 || now.saturating_sub(self.time) > REQUEST_LIFETIME {
+        if self.time > now + CLOCK_SKEW || now.saturating_sub(self.time) > REQUEST_LIFETIME + CLOCK_SKEW {
             return Err(Error::Refused("contact request is too old".into()));
         }
         Ok(())

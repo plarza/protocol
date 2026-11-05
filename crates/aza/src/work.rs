@@ -7,19 +7,10 @@ use std::sync::{Mutex, OnceLock};
 pub const MIN_WORK: u32 = 6;
 
 /// The work of a genesis change, given its encoding without `sig`: how many zero bits the
-/// Argon2id output starts with.
+/// Argon2id output starts with (counted by the verified `aza_core::heads::leading_zero_bits`).
 pub fn work(genesis_without_sig: &[u8]) -> u32 {
     let out = argon2id(genesis_without_sig, b"aza work v1", 65536, 1, 1).expect("fixed Argon2id parameters are valid");
-    let mut bits = 0;
-    for b in out {
-        if b == 0 {
-            bits += 8;
-        } else {
-            bits += b.leading_zeros();
-            break;
-        }
-    }
-    bits
+    aza_core::heads::leading_zero_bits(&out) as u32
 }
 
 /// The work of an identity's genesis change, computed once per process.

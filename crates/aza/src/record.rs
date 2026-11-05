@@ -69,10 +69,6 @@ impl Endorsement {
         merkle::root(&self.data()).try_into().expect("SHA-256 is 32 bytes")
     }
 
-    pub fn leaves(&self) -> &[Hash] {
-        &self.leaves
-    }
-
     /// The inclusion proof for a record hash, once the endorsing change is known.
     pub fn proof(&self, leaf: &Hash, change: Hash) -> Option<InclusionProof> {
         let index = self.leaves.binary_search(leaf).ok()?;
@@ -158,30 +154,35 @@ impl Record {
         Record::from_value(raw).expect("adding a proof keeps a record well formed")
     }
 
-    fn signature_valid(&self) -> bool {
-        crypto::verify(&self.certificate.client, &self.raw.without_all(&["sig", "endorsed"]).to_bytes(), &self.sig)
+    /// Rule 1 of section 10: the record is the identity's, and its signature and its
+    /// certificate's are valid, taking the signing device's key from the change that brought it
+    /// in even if that change is discarded.
+    pub fn authentic(&self, identity: &Identity) -> bool {
+        let unsigned = self.raw.without_all(&["sig", "endorsed"]).to_bytes();
+        self.identity == self.certificate.identity
+            && self.certificate.signed_by_device_key(identity)
+            && crypto::verify(&self.certificate.client, &unsigned, &self.sig)
     }
 
-    /// Whether anyone accepts this record, checked against the identity's change log: normally
-    /// while its certificate is valid, and afterwards through an endorsement.
+    /// Whether anyone accepts this record, checked against the identity's change log: while its
+    /// certificate works, and afterwards through an endorsement (section 10, decided by the
+    /// verified `aza_core::accept::record_valid`).
     pub fn is_valid(&self, identity: &Identity) -> bool {
         let cert = &self.certificate;
-        if self.identity != cert.identity || self.identity != identity.id || !self.signature_valid() {
-            return false;
-        }
-        if cert.app != self.app || !cert.has(PUBLISH) || identity.is_revoked(&cert.client_fp()) {
-            return false;
-        }
-        if cert.check(identity).is_ok() {
-            return true;
-        }
-        self.endorsement_counts(identity)
+        let works = cert.check(identity).is_ok();
+        aza_core::accept::record_valid(&aza_core::accept::RecordFacts {
+            authentic: self.authentic(identity),
+            publish: cert.app == self.app && cert.has(PUBLISH),
+            revoked: identity.is_revoked(&cert.client_fp()),
+            works,
+            // Only needed once the certificate stops working.
+            endorsed: !works && self.endorsement_counts(identity),
+        })
     }
 
+    /// Rules 3 and 4: an endorsing change of the device that signed the certificate has an
+    /// inclusion proof of this record that rebuilds its root.
     fn endorsement_counts(&self, identity: &Identity) -> bool {
-        if !self.certificate.signed_by_device_key(identity) {
-            return false;
-        }
         let leaf = self.leaf();
         identity.endorsement_holds(&self.certificate.by, |change, root| {
             self.endorsed.iter().any(|p| p.change == *change && p.verifies(&leaf, root))
@@ -189,19 +190,15 @@ impl Record {
     }
 }
 
-/// From every version of every record, the one readers take for each name: the highest valid
-/// version. Tombstones are returned too, so callers can tell a deleted name from a missing one.
+/// From every version of every record, the one readers take for each app and name: the highest
+/// valid version. Tombstones are returned too, so callers can tell a deleted name from a missing
+/// one.
 pub fn current_versions<'a>(records: &'a [Record], identity: &Identity) -> Vec<&'a Record> {
-    let mut best: std::collections::BTreeMap<&str, &Record> = std::collections::BTreeMap::new();
-    for r in records {
-        if !r.is_valid(identity) {
-            continue;
-        }
-        match best.get(r.name.as_str()) {
-            Some(b) if b.version >= r.version => {}
-            _ => {
-                best.insert(&r.name, r);
-            }
+    let mut best: std::collections::BTreeMap<(&str, &str), &Record> = std::collections::BTreeMap::new();
+    for r in records.iter().filter(|r| r.is_valid(identity)) {
+        let key = (r.app.as_str(), r.name.as_str());
+        if best.get(&key).is_none_or(|b| b.version < r.version) {
+            best.insert(key, r);
         }
     }
     best.into_values().collect()

@@ -61,10 +61,7 @@ impl From<aza::Error> for AzaError {
 type R<T> = Result<T, AzaError>;
 
 fn hex32(s: &str) -> R<[u8; 32]> {
-    hex::decode(s)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-        .ok_or(AzaError::Malformed { message: "expected 64 hex digits".into() })
+    aza::node::parse_hex32(s).ok_or(AzaError::Malformed { message: "expected 64 lowercase hex digits".into() })
 }
 
 /// One item of an app's sync data, decrypted.

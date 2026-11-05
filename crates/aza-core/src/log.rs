@@ -88,6 +88,8 @@ pub open spec fn valid(cs: Seq<Change>) -> bool {
 
 /// The result of reading a log. Vectors have one entry per change.
 pub struct Reading {
+    /// The ancestors of each change.
+    pub anc: Vec<Bits>,
     /// Reading order: every change that isn't discarded, each after its ancestors.
     pub order: Vec<usize>,
     /// For each change, the number of the master chain link it is (a copy of).
@@ -402,7 +404,7 @@ fn has_link_x(cs: &Vec<Change>, f: &Facts, k: usize, i: usize) -> (r: bool)
     false
 }
 
-fn next_of_x(b: &Body) -> (r: Hash)
+pub fn next_of_x(b: &Body) -> (r: Hash)
     ensures
         r@ == next_of(*b),
 {
@@ -1800,6 +1802,7 @@ pub fn read(cs: &Vec<Change>, genesis: usize) -> (r: Option<Reading>)
         r is Some <==> valid(cs@) && genesis_ok(cs@, genesis as int),
         r matches Some(rd) ==> {
             let ch = chain(cs@, genesis as int);
+            &&& anc_exact(cs@, rd.anc@)
             &&& rd.link.len() == cs.len()
             &&& rd.master_change.len() == cs.len()
             &&& rd.discarded.len() == cs.len()
@@ -1972,6 +1975,7 @@ pub fn read(cs: &Vec<Change>, genesis: usize) -> (r: Option<Reading>)
         i = i + 1;
     }
     Some(Reading {
+        anc: f.anc,
         order: f.order,
         link: f.link,
         links: f.links,

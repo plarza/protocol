@@ -1,6 +1,5 @@
 //! Private data, section 9: data secrets, app keys, envelopes and sync data.
 use crate::Value;
-use crate::certificate::Certificate;
 use crate::crypto::{self, Hash, SigningKey, hkdf, hkdf_named};
 use crate::error::{Error, Result};
 use crate::identity::Identity;
@@ -265,6 +264,17 @@ impl SyncItem {
             .with("ciphertext", self.ciphertext.clone().into())
     }
 
+    /// Keeps only the newest version of each item name.
+    pub fn latest(items: Vec<SyncItem>) -> Vec<SyncItem> {
+        let mut best: std::collections::BTreeMap<String, SyncItem> = std::collections::BTreeMap::new();
+        for i in items {
+            if best.get(&i.name).is_none_or(|b| b.version < i.version) {
+                best.insert(i.name.clone(), i);
+            }
+        }
+        best.into_values().collect()
+    }
+
     pub fn from_value(v: &Value) -> Result<SyncItem> {
         let bad = || Error::Malformed("sync item");
         Ok(SyncItem {
@@ -277,9 +287,4 @@ impl SyncItem {
             ciphertext: v.get("ciphertext").and_then(Value::as_bytes).ok_or_else(bad)?.to_vec(),
         })
     }
-}
-
-/// The holder of an envelope a client can read: its certificate's client key fingerprint.
-pub fn client_holder(cert: &Certificate) -> Hash {
-    cert.client_fp()
 }

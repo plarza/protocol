@@ -170,9 +170,14 @@ async fn walkthrough() {
         body: Body::SignOut { device: mac_id, endorse: None },
     }
     .sign(&pk);
-    nc.post_log(&id, &[thief_add.clone(), thief_out.clone()]).await.unwrap();
+    // Rule 4 ignores the thief's device, so the node doesn't even store its addition.
+    assert!(matches!(
+        nc.post_log(&id, std::slice::from_ref(&thief_add)).await,
+        Err(aza::Error::Node { status: 413, .. })
+    ));
+    nc.post_log(&id, std::slice::from_ref(&thief_out)).await.unwrap();
     let log = mac.refresh().await.unwrap().clone();
-    assert!(!log.is_current(&thief_add.hash()), "rule 4 ignores the thief's device");
+    assert!(log.change(&thief_add.hash()).is_none());
     assert!(!log.is_current(&mac_id), "the faked sign-out counts until the master acts");
     assert!(!log.is_current(&phone.device().id));
     assert!(cert.check(&log).is_err(), "certificates the Mac signed stop working while it is signed out");
@@ -193,7 +198,7 @@ async fn walkthrough() {
         .unwrap();
     let log = mac.refresh().await.unwrap().clone();
     assert!(log.is_master_change(&removal.hash()));
-    assert!(log.is_discarded(&thief_out.hash()) && log.is_discarded(&thief_add.hash()));
+    assert!(log.is_discarded(&thief_out.hash()));
     assert!(log.is_current(&mac_id), "the Mac is current again, with everything it did since");
     assert!(cert.check(&log).is_ok(), "coolgame's certificate works again");
     assert_eq!(log.handle().as_deref(), Some("sidny.me"));

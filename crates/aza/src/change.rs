@@ -1,10 +1,14 @@
 //! Changes, sections 5.1 to 5.3.
 use crate::Value;
-use crate::crypto::{self, Hash, PUBLIC_KEY_LEN, SigningKey, fingerprint, sha256};
+use crate::crypto::{self, Hash, SigningKey, sha256};
 use crate::error::{Error, Result};
 
+use aza_core::parse;
+
 /// The protocol version this software follows (section 13).
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = parse::VERSION;
+
+const _: () = assert!(crate::crypto::PUBLIC_KEY_LEN == parse::PUBLIC_KEY_LEN);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Body {
@@ -56,6 +60,46 @@ pub enum Body {
 }
 
 impl Body {
+    /// A body the verified parser read, once the checks outside the core pass: encryption keys
+    /// pass FIPS 203's check, a handle is a registrable domain, and a home node is a node URL.
+    /// `None` if one fails.
+    fn from_parsed(b: &parse::Body) -> Option<Body> {
+        let enc = |e: &[u8]| crypto::is_enc_public_key(e).then(|| e.to_vec());
+        let text = |t: &[u8]| String::from_utf8(t.to_vec()).ok();
+        Some(match b {
+            parse::Body::Genesis { key, enc: e, next, counter, check } => {
+                Body::Genesis { key: key.clone(), enc: enc(e)?, next: *next, counter: *counter, check: *check }
+            }
+            parse::Body::AddDevice { key, enc: e, label } => {
+                Body::AddDevice { key: key.clone(), enc: enc(e)?, label: text(label)? }
+            }
+            parse::Body::SignOut { device, endorse } => Body::SignOut { device: *device, endorse: *endorse },
+            parse::Body::RemoveDevice { device, keep, endorse } => {
+                Body::RemoveDevice { device: *device, keep: *keep, endorse: *endorse }
+            }
+            parse::Body::SetMaster { reveal, key, enc: e, next, endorse } => Body::SetMaster {
+                reveal: reveal.clone(),
+                key: key.clone(),
+                enc: enc(e)?,
+                next: *next,
+                endorse: *endorse,
+            },
+            parse::Body::SetHandle { handle } => Body::SetHandle {
+                handle: match handle {
+                    None => None,
+                    Some(h) => Some(text(h).filter(|h| crate::handle::is_handle(h))?),
+                },
+            },
+            parse::Body::SetHome { node } => {
+                Body::SetHome { node: text(node).filter(|n| crate::node::is_node_url(n))? }
+            }
+            parse::Body::RevokeClient { client } => Body::RevokeClient { client: *client },
+            parse::Body::NewSecret { check } => Body::NewSecret { check: *check },
+            parse::Body::Invalid => Body::Invalid,
+            parse::Body::Future => Body::Future,
+        })
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Body::Genesis { .. } => "genesis",
@@ -120,58 +164,6 @@ impl Body {
         }
         Value::map(m)
     }
-
-    /// Parses a body of a supported version; anything that breaks its type's form is `Invalid`.
-    fn parse(v: &Value) -> Body {
-        Body::try_parse(v).unwrap_or(Body::Invalid)
-    }
-
-    fn try_parse(v: &Value) -> Option<Body> {
-        let hash = |k: &str| v.get(k).and_then(Value::as_hash);
-        let opt_hash = |k: &str| match v.get(k) {
-            None => Some(None),
-            Some(x) => x.as_hash().map(Some),
-        };
-        let key =
-            |k: &str| v.get(k).and_then(Value::as_bytes).filter(|b| b.len() == PUBLIC_KEY_LEN).map(<[u8]>::to_vec);
-        let enc =
-            || v.get("enc").and_then(Value::as_bytes).filter(|b| crypto::is_enc_public_key(b)).map(<[u8]>::to_vec);
-        Some(match v.get("type")?.as_text()? {
-            "genesis" => Body::Genesis {
-                key: key("key")?,
-                enc: enc()?,
-                next: hash("next")?,
-                counter: v.get("counter")?.as_u64()?,
-                check: hash("check")?,
-            },
-            "add-device" => {
-                Body::AddDevice { key: key("key")?, enc: enc()?, label: v.get("label")?.as_text()?.to_string() }
-            }
-            "sign-out" => Body::SignOut { device: hash("device")?, endorse: opt_hash("endorse")? },
-            "remove-device" => {
-                Body::RemoveDevice { device: hash("device")?, keep: opt_hash("keep")?, endorse: opt_hash("endorse")? }
-            }
-            "set-master" => Body::SetMaster {
-                reveal: key("reveal")?,
-                key: key("key")?,
-                enc: enc()?,
-                next: hash("next")?,
-                endorse: opt_hash("endorse")?,
-            },
-            "set-handle" => Body::SetHandle {
-                handle: match v.get("handle") {
-                    None => None,
-                    Some(h) => Some(h.as_text().filter(|h| crate::handle::is_handle(h))?.to_string()),
-                },
-            },
-            "set-home" => {
-                Body::SetHome { node: v.get("node")?.as_text().filter(|u| crate::node::is_node_url(u))?.to_string() }
-            }
-            "revoke-client" => Body::RevokeClient { client: hash("client")? },
-            "new-secret" => Body::NewSecret { check: hash("check")? },
-            _ => return None,
-        })
-    }
 }
 
 /// A signed change.
@@ -179,7 +171,6 @@ impl Body {
 pub struct Change {
     raw: Value,
     hash: Hash,
-    id: Hash,
     pub v: u64,
     pub identity: Option<Hash>,
     pub prev: Vec<Hash>,
@@ -233,6 +224,9 @@ impl Unsigned {
     }
 }
 
+/// How far a signer's clock may be from a checker's, in seconds (section 3).
+pub const CLOCK_SKEW: u64 = 300;
+
 pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -242,58 +236,23 @@ impl Change {
         Change::from_value(Value::from_bytes(b).ok_or(Error::Malformed("change encoding"))?)
     }
 
-    /// Parses a change. Fields every change has must be well formed; a body that breaks its
-    /// type's form makes the change `Invalid` rather than unparseable, so that it still takes
-    /// its place in the log.
+    /// Parses a change exactly as the verified `aza_core::parse` says (sections 5.1, 5.3 and 13):
+    /// fields every change has must be well formed; a body that breaks its type's form makes the
+    /// change `Invalid` rather than unparseable, so that it still takes its place in the log. The
+    /// checks the core leaves out run here: encryption keys, handles and node URLs.
     pub fn from_value(raw: Value) -> Result<Change> {
-        let bad = Error::Malformed("change");
-        if raw.as_map().is_none() {
-            return Err(bad);
-        }
-        let v = raw.get("v").and_then(Value::as_u64).ok_or(Error::Malformed("change v"))?;
-        if v == 0 {
-            return Err(bad);
-        }
-        let time = raw.get("time").and_then(Value::as_u64).ok_or(Error::Malformed("change time"))?;
-        let sig = raw.get("sig").and_then(Value::as_bytes).ok_or(Error::Malformed("change sig"))?.to_vec();
-        let body_raw = raw.get("body").filter(|b| b.as_map().is_some()).ok_or(Error::Malformed("change body"))?;
-        let identity = match raw.get("identity") {
-            None => None,
-            Some(x) => Some(x.as_hash().ok_or(Error::Malformed("change identity"))?),
-        };
-        let prev = match raw.get("prev") {
-            None => Vec::new(),
-            Some(p) => p
-                .as_array()
-                .ok_or(Error::Malformed("change prev"))?
-                .iter()
-                .map(|h| h.as_hash().ok_or(Error::Malformed("change prev")))
-                .collect::<Result<Vec<_>>>()?,
-        };
-        let by = match raw.get("by") {
-            None => None,
-            Some(x) => Some(x.as_hash().ok_or(Error::Malformed("change by"))?),
-        };
-        let mut body = if v > VERSION { Body::Future } else { Body::parse(body_raw) };
-        // Which envelope fields are present depends on the type.
-        let fits = match &body {
-            Body::Genesis { .. } => identity.is_none() && raw.get("prev").is_none() && by.is_none(),
-            Body::SetMaster { .. } => identity.is_some() && by.is_none(),
-            Body::Future => identity.is_some(),
-            _ => identity.is_some() && by.is_some(),
-        };
-        if !fits {
-            if identity.is_none() {
-                return Err(bad);
+        let bad = || Error::Malformed("change");
+        let mut parsed = parse::parse_change(&raw, true).ok_or_else(bad)?;
+        let body = match Body::from_parsed(&parsed.body) {
+            Some(body) => body,
+            None => {
+                parsed = parse::parse_change(&raw, false).ok_or_else(bad)?;
+                Body::from_parsed(&parsed.body).expect("an invalid body needs no checks")
             }
-            body = Body::Invalid;
-        }
-        let hash = sha256(&raw.to_bytes());
-        let id = match body {
-            Body::SetMaster { .. } => sha256(&raw.without("sig").to_bytes()),
-            _ => hash,
         };
-        Ok(Change { raw, hash, id, v, identity, prev, time, by, body, sig })
+        let hash = sha256(&raw.without("sig").to_bytes());
+        let parse::Change { v, identity, prev, time, by, sig, .. } = parsed;
+        Ok(Change { raw, hash, v, identity, prev, time, by, body, sig })
     }
 
     pub fn to_value(&self) -> &Value {
@@ -304,14 +263,11 @@ impl Change {
         self.raw.to_bytes()
     }
 
-    /// The hash of the whole encoded change.
+    /// The change's name: the hash of its encoding without `sig`, so copies that differ only in
+    /// their signature are the same change (section 5.1). It is also the device ID of the device
+    /// the change brings in, if it brings one in (section 5.2).
     pub fn hash(&self) -> Hash {
         self.hash
-    }
-
-    /// The device ID this change would bring in (section 5.2).
-    pub fn device_id(&self) -> Hash {
-        self.id
     }
 
     /// The bytes the signature covers.
@@ -346,9 +302,5 @@ impl Change {
 
     pub fn verify_with(&self, key: &[u8]) -> bool {
         crypto::verify(key, &self.signing_bytes(), &self.sig)
-    }
-
-    pub fn key_fingerprint(&self) -> Option<Hash> {
-        self.device_key().map(fingerprint)
     }
 }

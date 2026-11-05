@@ -1,6 +1,6 @@
 //! Apps, clients and certificates, section 7.
 use crate::Value;
-use crate::crypto::{self, ENC_PUBLIC_KEY_LEN, Hash, PUBLIC_KEY_LEN, SigningKey, fingerprint};
+use crate::crypto::{self, Hash, PUBLIC_KEY_LEN, SigningKey, fingerprint};
 use crate::error::{Error, Result};
 use crate::identity::Identity;
 use base64::Engine;
@@ -15,18 +15,9 @@ pub const RECEIVE: &str = "receive";
 pub const AZA_APP: &str = "aza.network";
 
 /// Whether `s` is a domain name usable as an app ID: lowercase labels of letters, digits and
-/// hyphens, at least two of them.
+/// hyphens, at least two of them (verified in `aza_core::names`).
 pub fn is_app_id(s: &str) -> bool {
-    let labels: Vec<&str> = s.split('.').collect();
-    s.len() <= 253
-        && labels.len() >= 2
-        && labels.iter().all(|l| {
-            !l.is_empty()
-                && l.len() <= 63
-                && !l.starts_with('-')
-                && !l.ends_with('-')
-                && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
+    aza_core::names::is_app_id(s.as_bytes())
 }
 
 pub(crate) fn b64(b: &[u8]) -> String {
@@ -104,7 +95,7 @@ impl Certificate {
             raw.get("client").and_then(Value::as_bytes).filter(|b| b.len() == PUBLIC_KEY_LEN).ok_or_else(bad)?.to_vec();
         let enc = match raw.get("enc") {
             None => None,
-            Some(e) => Some(e.as_bytes().filter(|b| b.len() == ENC_PUBLIC_KEY_LEN).ok_or_else(bad)?.to_vec()),
+            Some(e) => Some(e.as_bytes().filter(|b| crypto::is_enc_public_key(b)).ok_or_else(bad)?.to_vec()),
         };
         let scopes = raw
             .get("scopes")
@@ -157,22 +148,28 @@ impl Certificate {
     }
 
     /// Checks 1 to 3 of section 7: the signature is valid, device `by` is current at the end of
-    /// the log, and the log has no revocation of the client key.
+    /// the log, and the log has no revocation of the client key (decided by the verified
+    /// `aza_core::accept::check`).
     pub fn check(&self, identity: &Identity) -> Result<()> {
-        if self.identity != identity.id {
-            return Err(Error::Refused("certificate is for another identity".into()));
+        use aza_core::accept::{CertFacts, CertFailure};
+        let device = identity.device(&self.by);
+        let facts = CertFacts {
+            identity: self.identity == identity.id,
+            signer: device.is_some(),
+            signature: device.as_ref().is_some_and(|d| self.signature_valid(&d.key)),
+            current: device.as_ref().is_some_and(|d| d.current),
+            revoked: identity.is_revoked(&self.client_fp()),
+        };
+        match aza_core::accept::check(&facts) {
+            None => Ok(()),
+            Some(CertFailure::OtherIdentity) => Err(Error::Refused("certificate is for another identity".into())),
+            Some(CertFailure::UnknownSigner) => Err(Error::Refused("certificate signer isn't a device".into())),
+            Some(CertFailure::BadSignature) => Err(Error::BadSignature("certificate")),
+            Some(CertFailure::NotCurrent) => {
+                Err(Error::Refused("the device that signed the certificate isn't current".into()))
+            }
+            Some(CertFailure::Revoked) => Err(Error::Refused("client is revoked".into())),
         }
-        let device = identity.device(&self.by).ok_or(Error::Refused("certificate signer isn't a device".into()))?;
-        if !self.signature_valid(&device.key) {
-            return Err(Error::BadSignature("certificate"));
-        }
-        if !device.current {
-            return Err(Error::Refused("the device that signed the certificate isn't current".into()));
-        }
-        if identity.is_revoked(&self.client_fp()) {
-            return Err(Error::Refused("client is revoked".into()));
-        }
-        Ok(())
     }
 
     /// The signature is valid for the key of device `by`, taking the key from the change that

@@ -8,13 +8,15 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use aza::Value;
+use aza::aza_core::access::{Request, Who};
 use aza::certificate::{Certificate, PUBLISH, READ, RECEIVE, WRITE};
+use aza::change::CLOCK_SKEW;
 use aza::change::{Body, Change};
 use aza::crypto::{self, Hash, sha256};
 use aza::data::{Envelope, SyncItem};
 use aza::identity::Identity;
 use aza::message::{InboxItem, KeyPackage};
-use aza::node::{AUTH_WINDOW, Auth, Export, Inbox, PairingKeys, TagBinding, decode_name, error_body, parse_hex32};
+use aza::node::{Auth, Export, Inbox, PairingKeys, TagBinding, decode_name, error_body, parse_hex32};
 use aza::profile::Profile;
 use aza::record::{InclusionProof, Record};
 use std::collections::HashMap;
@@ -36,8 +38,6 @@ pub struct Config {
     /// Bytes of sync data, envelopes, profile records, public records and blobs per identity.
     /// The change log never counts.
     pub quota: u64,
-    /// The most changes a log may hold.
-    pub max_changes: u64,
     /// The most items one holder's inbox may hold.
     pub max_inbox: u64,
     /// The most bytes the whole database may take: past it the node refuses anything that
@@ -52,7 +52,6 @@ impl Config {
             db: None,
             min_work: aza::work::MIN_WORK,
             quota: 100_000_000,
-            max_changes: 100_000,
             max_inbox: 10_000,
             max_total: None,
         }
@@ -107,17 +106,30 @@ fn forbidden(why: &str) -> Fail {
 
 /// Who made a request.
 enum Principal {
-    Device(Hash),
+    Device { id: Hash, current: bool },
     Client { fp: Hash, certs: Vec<Certificate> },
 }
 
 impl Principal {
     fn by(&self) -> Hash {
         match self {
-            Principal::Device(d) => *d,
+            Principal::Device { id, .. } => *id,
             Principal::Client { fp, .. } => *fp,
         }
     }
+}
+
+/// What a request names that decides who may make it (section 11.1).
+#[derive(Default)]
+struct Scope<'a> {
+    /// The request's app, and the scope a client's certificate needs for it.
+    app: Option<(&'a str, &'a str)>,
+    /// `GET envelopes`: a certificate with `read` or `receive`, for any app.
+    envelopes: bool,
+    holder: Option<&'a Hash>,
+    tag: Option<&'a Hash>,
+    /// `PUT …/endorsed`: the device that signed the endorsing change.
+    ended: Option<&'a Hash>,
 }
 
 struct Req {
@@ -195,25 +207,16 @@ impl Node {
         Ok(log)
     }
 
+    /// Checks the `aza-auth` header: its identity, time, nonce and signature, by a device of the
+    /// identity or a client whose certificate the node holds (or whose key is `client_key`).
     fn authenticate(&self, req: &Req, identity: &Identity, client_key: Option<&[u8]>) -> R<Principal> {
-        self.authenticate_as(req, identity, client_key, None)
-    }
-
-    /// As `authenticate`, but also admits the device `ended` though it is no longer current.
-    fn authenticate_as(
-        &self,
-        req: &Req,
-        identity: &Identity,
-        client_key: Option<&[u8]>,
-        ended: Option<&Hash>,
-    ) -> R<Principal> {
         let header = req.auth.as_deref().ok_or_else(|| Fail::Unauthorized("aza-auth header required".into()))?;
         let a = Auth::parse(header).map_err(|_| Fail::Unauthorized("malformed aza-auth header".into()))?;
         if a.identity != identity.id {
             return Err(Fail::Unauthorized("aza-auth names another identity".into()));
         }
         let t = now();
-        if a.time.abs_diff(t) > AUTH_WINDOW {
+        if a.time.abs_diff(t) > CLOCK_SKEW {
             return Err(Fail::Unauthorized("aza-auth time is off".into()));
         }
         let verify = |key: &[u8]| a.verify(key, &self.host, req.method.as_str(), &req.path, &req.body);
@@ -226,10 +229,7 @@ impl Node {
             if !verify(&device.key) {
                 return Err(Fail::Unauthorized("aza-auth signature".into()));
             }
-            if !device.current && ended != Some(&a.by) {
-                return Err(forbidden("device isn't current"));
-            }
-            Principal::Device(a.by)
+            Principal::Device { id: a.by, current: device.current }
         } else {
             let certs: Vec<Certificate> = self
                 .store()
@@ -241,42 +241,49 @@ impl Node {
             if !verify(&first.client) {
                 return Err(Fail::Unauthorized("aza-auth signature".into()));
             }
-            if identity.is_revoked(&a.by) {
-                return Err(forbidden("client is revoked"));
-            }
             Principal::Client { fp: a.by, certs }
         };
         let mut nonces = self.nonces.lock().unwrap();
         nonces.retain(|_, exp| *exp >= t);
-        if nonces.insert(a.nonce, t + 2 * AUTH_WINDOW).is_some() {
+        if nonces.insert(a.nonce, t + 2 * CLOCK_SKEW).is_some() {
             return Err(Fail::Unauthorized("aza-auth nonce reused".into()));
         }
         Ok(principal)
     }
 
-    fn require_device(p: &Principal) -> R<Hash> {
-        match p {
-            Principal::Device(d) => Ok(*d),
-            _ => Err(forbidden("this needs a current device")),
+    /// Authenticates a request and checks whoever signed it may make it, by section 11.1's
+    /// table (decided by the verified `aza_core::access`).
+    fn permit(&self, request: Request, req: &Req, identity: &Identity, scope: Scope) -> R<Principal> {
+        let p = self.authenticate(req, identity, None)?;
+        let who = match &p {
+            Principal::Device { id, current } => {
+                Who::Device { current: *current, ended: scope.ended == Some(id), holder: scope.holder == Some(id) }
+            }
+            Principal::Client { fp, certs } => {
+                let works = |c: &&Certificate| c.check(identity).is_ok();
+                let has = match scope.app {
+                    Some((app, needed)) => certs.iter().filter(works).any(|c| c.app == app && c.has(needed)),
+                    None => scope.envelopes && certs.iter().filter(works).any(|c| c.has(READ) || c.has(RECEIVE)),
+                };
+                let registered = match scope.tag {
+                    Some(tag) => match self.tag_state(identity, tag)? {
+                        Some((app, _)) => self.registered(identity, tag, &app, fp)?.is_some(),
+                        None => false,
+                    },
+                    None => false,
+                };
+                Who::Client {
+                    revoked: identity.is_revoked(fp),
+                    scope: has,
+                    registered,
+                    holder: scope.holder == Some(fp),
+                }
+            }
+        };
+        if !aza::aza_core::access::allowed(&request, &who) {
+            return Err(forbidden("whoever signed this request may not make it (section 11.1)"));
         }
-    }
-
-    /// A certificate the node holds for the client that passes every check for `app` and `scope`.
-    fn client_has<'a>(
-        identity: &Identity,
-        certs: &'a [Certificate],
-        app: &str,
-        scope: &str,
-    ) -> Option<&'a Certificate> {
-        certs.iter().find(|c| c.identity == identity.id && c.app == app && c.has(scope) && c.check(identity).is_ok())
-    }
-
-    fn require_scope(identity: &Identity, p: &Principal, app: &str, scope: &str, device_ok: bool) -> R<()> {
-        match p {
-            Principal::Device(_) if device_ok => Ok(()),
-            Principal::Client { certs, .. } if Self::client_has(identity, certs, app, scope).is_some() => Ok(()),
-            _ => Err(forbidden(&format!("this needs {scope} for {app}"))),
-        }
+        Ok(p)
     }
 
     fn check_quota(&self, identity: &Hash, removing: u64, adding: u64) -> R<()> {
@@ -385,30 +392,31 @@ impl Node {
         let min = if new_identity { self.config.min_work } else { aza::work::MIN_WORK };
         let log = Identity::read_with_work(*id, all, min)
             .map_err(|_| forbidden("no valid genesis change, or too little work"))?;
-        let known: std::collections::HashSet<Hash> = existing.iter().map(Change::hash).collect();
-        let mut stored = 0;
-        let mut count = existing.len() as u64;
-        let s = self.store();
-        for c in uploaded {
-            if known.contains(&c.hash()) || log.change(&c.hash()).is_none() {
+        let held: std::collections::HashSet<Hash> = existing.iter().map(Change::hash).collect();
+        let mut fresh = std::collections::HashSet::new();
+        for c in &uploaded {
+            if held.contains(&c.hash()) || log.change(&c.hash()).is_none() {
                 continue;
             }
             let key = match c.own_signer() {
                 Some(k) => Some(k.to_vec()),
                 None => c.by.and_then(|b| log.device_key_any(&b).map(<[u8]>::to_vec)),
             };
-            if !key.is_some_and(|k| c.verify_with(&k)) {
-                continue;
+            if key.is_some_and(|k| c.verify_with(&k)) {
+                fresh.insert(c.hash());
             }
-            if count >= self.config.max_changes {
-                return Err(Fail::TooLarge("this log holds as many changes as the node keeps".into()));
-            }
-            s.add_change(id, &c.hash(), &c.to_bytes())?;
-            count += 1;
-            stored += 1;
         }
-        drop(s);
-        Ok(stored)
+        // The node limits a log only as section 11 allows: per signing device.
+        let kept: std::collections::HashSet<Hash> = log.admit(&held, &fresh).into_iter().collect();
+        let s = self.store();
+        // The copy the reading keeps, whose signature is valid.
+        for c in log.changes().iter().filter(|c| kept.contains(&c.hash())) {
+            s.add_change(id, &c.hash(), &c.to_bytes())?;
+        }
+        if kept.len() < fresh.len() {
+            return Err(Fail::TooLarge("the node keeps no more of these changes (section 11)".into()));
+        }
+        Ok(kept.len() as u64)
     }
 
     fn post_log(&self, id: &Hash, req: &Req) -> R<Value> {
@@ -467,7 +475,7 @@ impl Node {
 
     fn get_export(&self, id: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        Self::require_device(&self.authenticate(req, &identity, None)?)?;
+        self.permit(Request::GetExport, req, &identity, Scope::default())?;
         Ok(self.export(id)?.to_value())
     }
 
@@ -481,7 +489,7 @@ impl Node {
         let mut all = existing;
         all.extend(export.log.iter().cloned());
         let log = Identity::read_with_work(*id, all, self.config.min_work)?;
-        Self::require_device(&self.authenticate(req, &log, None)?)?;
+        self.permit(Request::PostImport, req, &log, Scope::default())?;
         self.store_changes(id, export.log.clone())?;
         let log = self.identity(id)?;
         let size: u64 = export.sync.iter().map(|i| i.to_value().to_bytes().len() as u64).sum::<u64>()
@@ -506,7 +514,7 @@ impl Node {
             for p in export.profiles.iter().filter(|p| p.signature_valid(&log)) {
                 s.put_profile(id, &p.by, &p.to_value().to_bytes())?;
             }
-            for r in export.records.iter().filter(|r| r.identity == *id) {
+            for r in export.records.iter().filter(|r| r.authentic(&log)) {
                 s.put_record(id, &r.app, &r.name, r.version, &r.to_value().to_bytes())?;
             }
             for (h, d) in export.blobs.iter().filter(|(h, d)| sha256(d) == *h) {
@@ -533,16 +541,14 @@ impl Node {
 
     fn get_sync(&self, id: &Hash, app: &str, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        let p = self.authenticate(req, &identity, None)?;
-        Self::require_scope(&identity, &p, app, READ, true)?;
+        self.permit(Request::GetSync, req, &identity, Scope { app: Some((app, READ)), ..Default::default() })?;
         let s = self.store();
         Ok(page(s.sync_since(id, app, req.since()?)?, s.counter(id)?))
     }
 
     fn put_sync(&self, id: &Hash, app: &str, name: &str, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        let p = self.authenticate(req, &identity, None)?;
-        Self::require_scope(&identity, &p, app, WRITE, true)?;
+        self.permit(Request::PutSync, req, &identity, Scope { app: Some((app, WRITE)), ..Default::default() })?;
         let name = decode_name(name).ok_or_else(|| bad("item name"))?;
         let item = SyncItem::from_value(&req.value()?).map_err(|e| Fail::Bad(e.to_string()))?;
         if item.identity != *id || item.app != app || item.name != name {
@@ -575,21 +581,14 @@ impl Node {
 
     fn get_envelopes(&self, id: &Hash, holder: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        let allowed = match self.authenticate(req, &identity, None)? {
-            Principal::Device(d) => d == *holder,
-            Principal::Client { fp, certs } => {
-                fp == *holder && certs.iter().any(|c| (c.has(READ) || c.has(RECEIVE)) && c.check(&identity).is_ok())
-            }
-        };
-        if !allowed {
-            return Err(forbidden("only the holder reads its envelopes"));
-        }
+        let scope = Scope { envelopes: true, holder: Some(holder), ..Default::default() };
+        self.permit(Request::GetEnvelopes, req, &identity, scope)?;
         Ok(values(self.store().envelopes_for(id, holder)?))
     }
 
     fn post_envelopes(&self, id: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        Self::require_device(&self.authenticate(req, &identity, None)?)?;
+        self.permit(Request::PostEnvelopes, req, &identity, Scope::default())?;
         let v = req.value()?;
         let envs: Vec<Envelope> = v
             .as_array()
@@ -619,8 +618,8 @@ impl Node {
 
     fn put_record(&self, id: &Hash, app: &str, name: &str, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        let p = self.authenticate(req, &identity, None)?;
-        Self::require_scope(&identity, &p, app, PUBLISH, false)?;
+        let p =
+            self.permit(Request::PutRecord, req, &identity, Scope { app: Some((app, PUBLISH)), ..Default::default() })?;
         let name = decode_name(name).ok_or_else(|| bad("record name"))?;
         let record = Record::from_value(req.value()?).map_err(|e| Fail::Bad(e.to_string()))?;
         if record.identity != *id || record.app != app || record.name != name || !record.endorsed.is_empty() {
@@ -649,7 +648,7 @@ impl Node {
         let identity = self.identity(id)?;
         let proof = InclusionProof::from_value(&req.value()?).map_err(|e| Fail::Bad(e.to_string()))?;
         let change = identity.change(&proof.change).ok_or_else(|| Fail::Bad("unknown endorsing change".into()))?;
-        Self::require_device(&self.authenticate_as(req, &identity, None, change.by.as_ref())?)?;
+        self.permit(Request::PutEndorsed, req, &identity, Scope { ended: change.by.as_ref(), ..Default::default() })?;
         let name = decode_name(name).ok_or_else(|| bad("record name"))?;
         let stored = self.store().record(id, app, &name, version)?.ok_or(Fail::NotFound)?;
         let record = Record::from_value(Value::from_bytes(&stored).ok_or_else(|| bad("stored record"))?)
@@ -701,24 +700,18 @@ impl Node {
         Ok(Value::null())
     }
 
-    fn inbox_holder(&self, identity: &Identity, inbox: &Inbox, holder: &Hash, req: &Req) -> R<()> {
-        match (self.authenticate(req, identity, None)?, inbox) {
-            (Principal::Device(d), _) if d == *holder => Ok(()),
-            (Principal::Client { fp, .. }, Inbox::Tag(tag)) if fp == *holder => {
-                let (app, _) = self.tag_state(identity, tag)?.ok_or(Fail::NotFound)?;
-                match self.registered(identity, tag, &app, &fp)? {
-                    Some(_) => Ok(()),
-                    None => Err(forbidden("client isn't registered under this tag")),
-                }
-            }
-            _ => Err(forbidden("only the holder reads its inbox")),
-        }
+    fn inbox_scope<'a>(inbox: &'a Inbox, holder: &'a Hash) -> Scope<'a> {
+        let tag = match inbox {
+            Inbox::Tag(t) => Some(t),
+            Inbox::Requests => None,
+        };
+        Scope { holder: Some(holder), tag, ..Default::default() }
     }
 
     fn get_inbox(&self, id: &Hash, inbox: &str, holder: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
         let inbox = Inbox::parse(inbox).ok_or_else(|| bad("inbox"))?;
-        self.inbox_holder(&identity, &inbox, holder, req)?;
+        self.permit(Request::GetInbox, req, &identity, Self::inbox_scope(&inbox, holder))?;
         let s = self.store();
         Ok(page(s.inbox_since(id, &inbox.segment(), holder, req.since()?)?, s.counter(id)?))
     }
@@ -726,7 +719,7 @@ impl Node {
     fn delete_inbox(&self, id: &Hash, inbox: &str, holder: &Hash, item: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
         let inbox = Inbox::parse(inbox).ok_or_else(|| bad("inbox"))?;
-        self.inbox_holder(&identity, &inbox, holder, req)?;
+        self.permit(Request::DeleteInbox, req, &identity, Self::inbox_scope(&inbox, holder))?;
         if self.store().delete_inbox(id, &inbox.segment(), holder, item)? == 0 {
             return Err(Fail::NotFound);
         }
@@ -737,9 +730,13 @@ impl Node {
 
     fn put_registration(&self, id: &Hash, tag: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        let p = self.authenticate(req, &identity, None)?;
         let (app, _) = self.tag_state(&identity, tag)?.ok_or_else(|| forbidden("tag isn't bound to an app"))?;
-        Self::require_scope(&identity, &p, &app, RECEIVE, false)?;
+        let p = self.permit(
+            Request::PutRegistration,
+            req,
+            &identity,
+            Scope { app: Some((&app, RECEIVE)), ..Default::default() },
+        )?;
         let cert = Certificate::from_value(req.value()?).map_err(|e| Fail::Bad(e.to_string()))?;
         if cert.client_fp() != p.by() || cert.app != app || !cert.has(RECEIVE) || cert.check(&identity).is_err() {
             return Err(forbidden("a client registers with its own receive certificate for the tag's app"));
@@ -750,21 +747,19 @@ impl Node {
 
     fn delete_registration(&self, id: &Hash, tag: &Hash, client: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        Self::require_device(&self.authenticate(req, &identity, None)?)?;
+        self.permit(Request::DeleteRegistration, req, &identity, Scope::default())?;
         self.store().delete_registration(id, tag, client)?;
         Ok(Value::null())
     }
 
     fn post_key_packages(&self, id: &Hash, tag: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        let p = self.authenticate(req, &identity, None)?;
         let (app, current) = self.tag_state(&identity, tag)?.ok_or_else(|| forbidden("tag isn't bound to an app"))?;
         if !current {
             return Err(forbidden("tag is marked old"));
         }
-        if self.registered(&identity, tag, &app, &p.by())?.is_none() {
-            return Err(forbidden("client isn't registered under this tag"));
-        }
+        let p =
+            self.permit(Request::PostKeyPackages, req, &identity, Scope { tag: Some(tag), ..Default::default() })?;
         let v = req.value()?;
         let pkgs: Vec<KeyPackage> = v
             .as_array()
@@ -806,7 +801,7 @@ impl Node {
 
     fn delete_key_packages(&self, id: &Hash, tag: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        Self::require_device(&self.authenticate(req, &identity, None)?)?;
+        self.permit(Request::DeleteKeyPackages, req, &identity, Scope::default())?;
         self.store().delete_key_packages(id, tag)?;
         Ok(Value::null())
     }
@@ -835,7 +830,7 @@ impl Node {
 
     fn put_profile(&self, id: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        Self::require_device(&self.authenticate(req, &identity, None)?)?;
+        self.permit(Request::PutProfile, req, &identity, Scope::default())?;
         let p = Profile::from_value(req.value()?).map_err(|e| Fail::Bad(e.to_string()))?;
         if p.identity != *id || !p.signature_valid(&identity) || !identity.is_current(&p.by) {
             return Err(forbidden("profile record must be signed by a current device"));
@@ -853,7 +848,7 @@ impl Node {
 
     fn put_blob(&self, id: &Hash, hash: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        Self::require_device(&self.authenticate(req, &identity, None)?)?;
+        self.permit(Request::PutBlob, req, &identity, Scope::default())?;
         let v = req.value()?;
         let data = v.as_bytes().ok_or_else(|| bad("blob"))?;
         if sha256(data) != *hash {
@@ -870,7 +865,7 @@ impl Node {
 
     fn delete_blob(&self, id: &Hash, hash: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        Self::require_device(&self.authenticate(req, &identity, None)?)?;
+        self.permit(Request::DeleteBlob, req, &identity, Scope::default())?;
         self.store().delete_blob(id, hash)?;
         Ok(Value::null())
     }
@@ -908,7 +903,7 @@ impl Node {
 
     fn put_tag(&self, id: &Hash, tag: &Hash, req: &Req) -> R<Value> {
         let identity = self.identity(id)?;
-        let device = Self::require_device(&self.authenticate(req, &identity, None)?)?;
+        let device = self.permit(Request::PutTag, req, &identity, Scope::default())?.by();
         let v = req.value()?;
         let app = v
             .get("app")

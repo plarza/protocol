@@ -240,7 +240,6 @@ dependencies = [
  "libcrux-ml-kem",
  "libcrux-sha2",
  "libcrux-traits",
- "percent-encoding",
  "psl",
  "reqwest",
  "serde_json",

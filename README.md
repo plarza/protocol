@@ -50,7 +50,9 @@ Each of these is specified in detail later; this is just enough to read the rest
 
 **Private keys.** A signing private key is 64 bytes: the Ed25519 secret key of RFC 8032 followed by the 32-byte ML-DSA-65 key generation seed of FIPS 204. An encryption private key is the 32-byte X-Wing decapsulation key.
 
-**Encoding.** Everything is encoded as [CBOR](https://en.wikipedia.org/wiki/CBOR) using the deterministic encoding of RFC 8949 section 4.2.1, which gives every value exactly one byte form. A signature covers the encoded object without its `sig` field; a hash covers the whole encoded object. A fingerprint is the hash of a public key's bytes as laid out above. Keys, signatures and hashes are CBOR byte strings. Nodes and readers reject any object that isn't in exactly this deterministic form, and verify signatures exactly one way: Ed25519 as in RFC 8032 section 5.1.7 with the cofactorless equation `[S]B = R + [k]A`, rejecting `S` ≥ L, non-canonical encodings of `R` and `A`, and small-order `A`; ML-DSA-65 as pure ML-DSA from FIPS 204 with an empty context string. That way every reader accepts exactly the same signatures, so nobody can make a second valid copy of someone else's signed object with a different hash. Byte strings in URL paths (identity IDs, device IDs, fingerprints, hashes and contact tags, section 10) are written as lowercase hex. An item `name` in a path is a single segment, percent-encoded as in RFC 3986 with every character other than letters, digits, `-`, `.`, `_` and `~` encoded (so `/` becomes `%2F`), and that exact form is what the `aza-auth` header signs (section 11.1). Examples in this document are written as JSON, with byte strings shortened to hex like `"9f2c…"`.
+**Encoding.** Everything is encoded as [CBOR](https://en.wikipedia.org/wiki/CBOR) using the deterministic encoding of RFC 8949 section 4.2.1, which gives every value exactly one byte form. A signature covers the encoded object without its `sig` field; a hash covers the whole encoded object, except that a change is named by its hash without `sig` (section 5.1). A fingerprint is the hash of a public key's bytes as laid out above. Keys, signatures and hashes are CBOR byte strings. Nodes and readers reject any object that isn't in exactly this deterministic form, and verify signatures exactly one way: Ed25519 as in RFC 8032 section 5.1.7 with the cofactorless equation `[S]B = R + [k]A`, rejecting `S` ≥ L, non-canonical encodings of `R` and `A`, and small-order `A`; ML-DSA-65 as pure ML-DSA from FIPS 204 with an empty context string. That way every reader accepts exactly the same signatures, so nobody can make a second valid copy of someone else's signed object with a different hash. Byte strings in URL paths (identity IDs, device IDs, fingerprints, hashes and contact tags, section 10) are written as lowercase hex. An item `name` in a path is a single segment, percent-encoded as in RFC 3986: every byte of its UTF-8 other than letters, digits, `-`, `.`, `_` and `~` is encoded, and only those, with uppercase hex digits (so `/` becomes `%2F`). That one form is what the `aza-auth` header signs (section 11.1). Examples in this document are written as JSON, with byte strings shortened to hex like `"9f2c…"`.
+
+**Time.** Times are Unix seconds. Wherever a time is checked against a clock, the checker allows for the two clocks being up to 5 minutes apart.
 
 ## 4. Devices and the master
 
@@ -101,6 +103,8 @@ Every change has the same fields:
 | `body` | What the change does (section 5.3). |
 | `sig` | Signature over all the other fields: by device `by`, or by `body.key` in a `genesis` change and by `body.reveal` in a `set-master` change. |
 
+A change's **hash**, which names it everywhere (in `prev`, `keep` and device IDs), is the hash of the change without `sig`. Copies of a change that differ only in their signature are therefore the same change, and readers keep a copy whose signature is valid.
+
 The **ancestors** of a change are the changes listed in its `prev`, the changes listed in their `prev`, and so on back to the start. A change only counts as an ancestor if it is actually in the log.
 
 ### 5.2 The genesis change, the identity ID and device IDs
@@ -109,7 +113,7 @@ The **genesis change** is the first change of every identity. Its body holds the
 
 The **identity ID** is the hash of the genesis change. It never changes. Everything that refers to an identity uses its identity ID.
 
-A **device ID** names one device: the hash of the change that brought it in. For an ordinary device that is its `add-device` change; for the first master it is the genesis change (so its device ID is the identity ID); for a later master it is the hash of its `set-master` change without `sig`, so that copies of the same handoff differing only in signature name the same master. Devices are named this way rather than by their key so that a removal applies to one specific addition, never to some other addition of the same key.
+A **device ID** names one device: the hash of the change that brought it in, its `add-device`, `set-master` or genesis change. So the first master's device ID is the identity ID. Devices are named this way rather than by their key so that a removal applies to one specific addition, never to some other addition of the same key.
 
 ### 5.3 Change types
 
@@ -133,7 +137,7 @@ Two devices can sign changes without knowing about each other. For example, aide
 
 A log is read in five steps. Each step only uses the results of the steps before it.
 
-**Step 1: the master.** The masters form a **master chain**, worked out on the whole log. Its first link is the genesis change. A `set-master` change is the **next link** after link L if the fingerprint of its `reveal` equals L's `next`, its signature is valid for `reveal`, L is one of its ancestors, its `key` differs from its `reveal` and isn't the `key` or `reveal` of any `genesis`, `set-master` or `add-device` change among its ancestors, and its `next` isn't the fingerprint of its own `key`, its `reveal`, or any `key` or `reveal` among its ancestors. Next links that are identical apart from `sig` count as one, and having any of those copies among a change's ancestors counts as having the link; next links that differ in anything else are a master conflict. The genesis change likewise needs the fingerprint of its `key` to differ from its `next`. A link's **master key** is its `key`. If a link has exactly one next link, the chain continues from there. If it has two or more, that is a **master conflict**: the chain ends at that link, none of its next links count, and the identity has no master from then on.
+**Step 1: the master.** The masters form a **master chain**, worked out on the whole log. Its first link is the genesis change. A `set-master` change is the **next link** after link L if the fingerprint of its `reveal` equals L's `next`, its signature is valid for `reveal`, L is one of its ancestors, its `key` differs from its `reveal` and isn't the `key` or `reveal` of any `genesis`, `set-master` or `add-device` change among its ancestors, and its `next` isn't the fingerprint of its own `key`, its `reveal`, or any `key` or `reveal` among its ancestors. The genesis change likewise needs the fingerprint of its `key` to differ from its `next`. A link's **master key** is its `key`. If a link has exactly one next link, the chain continues from there. If it has two or more, that is a **master conflict**: the chain ends at that link, none of its next links count, and the identity has no master from then on.
 
 A **master change** is a link itself, or a change whose `by` is a link's device ID, signed by that link's master key, that has that link among its ancestors and is an ancestor of every next link of that link. In other words, a master's changes only count if they were made while it was the master: a former master's changes made after (or concurrently with) its handoff don't count, however `prev` was faked. If the chain ended in a master conflict, only that last link's master changes that are ancestors of all the conflicting next links count. The aza app signs exactly one handoff per next key and re-uploads that same change if it needs to, because two different handoffs by the same next key are a master conflict.
 
@@ -162,7 +166,7 @@ Judging on their own means two devices that sign each other out at the same mome
 
 When several changes set the same thing, such as two `set-handle`s, the last one applied wins.
 
-**Fine points.** A sign-out or revocation that doesn't count (step 4) does nothing when it is reached; it isn't tried again under rules 1 to 4. A change whose `by` names a device that no change in the log brings in isn't discarded, but fails rule 2. "An ancestor of every next link" means of every copy of it. A change that is its own ancestor, or has such a change among its ancestors, needs a SHA-256 collision; readers leave it out of the log.
+**Fine points.** A sign-out or revocation that doesn't count (step 4) does nothing when it is reached; it isn't tried again under rules 1 to 4. A change whose `by` names a device that no change in the log brings in isn't discarded, but fails rule 2. A change that is its own ancestor, or has such a change among its ancestors, needs a SHA-256 collision; readers leave it out of the log.
 
 **What this means in practice.**
 
@@ -174,13 +178,13 @@ When several changes set the same thing, such as two `set-handle`s, the last one
 - No ordinary device ever holds the master's keys, so stealing a phone or computer never gives the thief the master.
 - After a master conflict nothing can remove devices any more, and the identity has to be abandoned.
 
-**Example: a stolen phone.** A thief steals aiden's unlocked phone and adds the thief's own device. aiden's laptop, not having seen that, signs out the phone. The thief's `add-device` isn't an ancestor of that sign-out, so rule 4 ignores it, and the thief's device never becomes current. Its sign-outs and revocations still count for now, and so do the phone's: the thief uses the phone to sign out the laptop, faking `prev` so it looks older, and now both are signed out. aiden opens the master's backup file in the aza app and removes the phone with `keep` set to the phone's last change before the theft. The thief's sign-out of the laptop and everything the thief's device did are discarded, the laptop is current again, and everything it did since counts.
+**Example: a stolen phone.** A thief steals aiden's unlocked phone and adds the thief's own device. aiden's laptop, not having seen that, signs out the phone. The thief's `add-device` isn't an ancestor of that sign-out, so rule 4 ignores it, the thief's device never becomes current, and a node that already holds the sign-out refuses to store it (section 11). Its sign-outs and revocations still count for now, and so do the phone's: the thief uses the phone to sign out the laptop, faking `prev` so it looks older, and now both are signed out. aiden opens the master's backup file in the aza app and removes the phone with `keep` set to the phone's last change before the theft. The thief's sign-out of the laptop and everything the thief's device did are discarded, the laptop is current again, and everything it did since counts.
 
 The aza app downloads the newest log from the home node before signing any change, so that it doesn't throw away legitimate changes it simply hadn't seen yet.
 
 ## 6. Handle and profile
 
-**Handle.** A **handle** is a [registrable domain](https://en.wikipedia.org/wiki/Public_Suffix_List) the identity owns: the part of a domain you can buy, like `sidny.me` or `example.com.au`, but never a subdomain like `blog.sidny.me`. It is set in the change log with `set-handle`, because it is how people find and recognise the identity. To prove it, the owner adds this DNS record, with the identity ID written as 64 lowercase hex characters:
+**Handle.** A **handle** is a [registrable domain](https://en.wikipedia.org/wiki/Public_Suffix_List) the identity owns, written like an app ID (section 7): the part of a domain you can buy, like `sidny.me` or `example.com.au`, but never a subdomain like `blog.sidny.me`. It is set in the change log with `set-handle`, because it is how people find and recognise the identity. To prove it, the owner adds this DNS record, with the identity ID written as 64 lowercase hex characters:
 
 ```
 _aza.sidny.me  TXT  "aza=<identity ID> node=<home node URL>"
@@ -214,7 +218,7 @@ A node keeps the newest profile record from each device, and a reader uses the o
 
 ## 7. Apps, clients and certificates
 
-An **app** is a service, named by a domain it controls: `coach.aza.network`, `coolgame.com`. That domain is its **app ID**. The aza app's own app ID is `aza.network`.
+An **app** is a service, named by a domain it controls: `coach.aza.network`, `coolgame.com`. That domain is its **app ID**, written in lowercase: two or more labels separated by dots, each 1 to 63 letters, digits and hyphens that neither starts nor ends with a hyphen, and at most 253 characters in all. The aza app's own app ID is `aza.network`.
 
 A **client** is one piece of software acting for an identity inside one app. The iPhone and Mac versions of a messenger are two clients of one app. Each client makes its own signing key pair, the **client key**, and, if it will read sync data, its own encryption key pair. Clients never see device keys. A client keeps its private keys, and the app key and contact tags it opens, only where no other program can read them: on a phone or computer, the operating system's keychain for that app alone; on a server, encrypted under a key kept apart from the stored data, such as in the server's secret store. Never in a plain file, a database or a backup.
 
@@ -267,7 +271,7 @@ A client is **current** for an app while it holds a certificate for that app tha
 
 **Revoking.** A `revoke-client` change puts only the client key's fingerprint into the log, so it doesn't reveal which app the client belonged to.
 
-**The list of approvals.** The aza app keeps at most 64 certificates in effect per identity. It stores the list of them as its own sync data (section 9), so every device of the identity shows the same apps, clients and scopes, and any of them can revoke one. Beside it, a second item maps each client key's fingerprint to the label of the request it answered, if it had one.
+**The list of approvals.** The aza app keeps at most 64 certificates in effect per identity. It stores them as its own sync data (section 9), in an item named `approvals`: a list of `{certificate, label}`, where `label` is the label of the request the certificate answered, if it had one. So every device of the identity shows the same apps, clients, scopes and labels, and any of them can revoke one.
 
 **App details.** An app may describe itself at `https://<app ID>/.well-known/aza/app`, as JSON:
 
@@ -406,6 +410,8 @@ Rule 3 means a thief signing out someone else's device can only endorse records 
 
 A **node** is a server that stores change logs, sync data, envelopes, certificates, profile records, public records, blobs, tag bindings, registrations, inbox items and key packages. Anyone can run one. Each node's operator decides what it stores, and may refuse any upload. aza runs a node too, and in the protocol it is like any other.
 
+**Limits on a change log.** A node limits what a change log holds only per device, so that a stolen device can never stop the others repairing the identity. It always keeps master changes. It refuses a `genesis` change that isn't the identity's and a `set-master` that doesn't reveal the next key of a link of the chain, because anyone can sign those with a key of their own; a `set-master` that does reveal one counts toward that link's allowance, so competing handoffs still reach the log. It refuses an `add-device` that wouldn't be applied, so every device it holds changes for was once current. It always keeps a device's first sign-out of each other device. Every other change counts toward its signer's allowance of 128. So until the master repairs it, a thief controls at most 64 devices and adds at most 64 × 128 changes, and reading a log takes bounded work.
+
 An identity's **home node** is the node it chose, with a `set-home` change, to hold its change log and everything else the identity stores. During setup the aza app suggests aza's node; any node works. The aza node stores up to 100 MB of sync data, envelopes, profile records, public records and blobs per identity; other nodes set their own limits. The aza node never counts the change log toward that limit, so an identity can always upload a sign-out or removal, however full its storage is.
 
 **Moving.** Before signing a `set-home` for a new node, the aza app moves everything the identity stores: it fetches it from the old node with `GET export` and uploads it to the new one with `POST import`. The new node checks every signature it can (changes, certificates, profile and public records, envelopes) and keeps sync data, blobs, tag bindings, registrations, inbox items and key packages as they were, without the usual version and client checks. The new node judges the import's permission using the change log inside it, and the aza app binds every tag again on the new node straight after the import. The aza app uploads the new `set-home` to both nodes, and the old node keeps answering requests for the log for at least one year. Anyone who still has the old address, including clients whose certificate names the old node, sees the latest `set-home` and follows it.
@@ -421,7 +427,7 @@ Every node answers these HTTP requests under `https://<node>/aza/v1/`. A node's 
 | `GET log/{identity}` | anyone | returns every change the node holds for the identity |
 | `GET export/{identity}` | a current device | returns everything the node holds for the identity, for moving |
 | `POST import/{identity}` | a current device | stores an export from another node, as described under **Moving** |
-| `POST log/{identity}` | anyone | uploads changes; the node keeps those with valid signatures that it chooses to store, and checks a new identity's work against its admission price (section 12) |
+| `POST log/{identity}` | anyone | uploads changes; the node keeps those with valid signatures that fit the limits above, and checks a new identity's work against its admission price (section 12) |
 | `GET sync/{identity}/{app}?since={n}` | a current device, or a client with `read` for `app` | returns the items the node has stored or changed since its own counter `n`, plus the new counter |
 | `PUT sync/{identity}/{app}/{name}` | a current device, or a client with `write` for `app` | stores one item; refused unless `version` is exactly one more than the stored one and `secret` is the current secret |
 | `POST certificates/{identity}` | the client the certificate names, authenticated with the client key inside the certificate in the body | stores a certificate, so its client can then authenticate by fingerprint |
@@ -448,11 +454,11 @@ Every node answers these HTTP requests under `https://<node>/aza/v1/`. A node's 
 | `PUT pairing/{id}/reply` | anyone with the pairing URL | stores the approving device's reply: the identity ID, home node URL and new device ID, sealed to the new device's encryption key. The node keeps only the first reply. The new device checks its `add-device` change in the log, then shows the identity's name, handle (checked through DNS) and ID, and only joins once the person confirms it's theirs. |
 | `GET pairing/{id}` | anyone with the pairing URL | returns the new device's public keys, until they expire |
 | `GET pairing/{id}/reply` | anyone with the pairing URL | returns the sealed reply, once there is one |
-| `PUT tags/{identity}/{tag}` | a current device | binds a tag to an app and marks it current or old, or changes that. Marking a tag current makes the app's previous current tag old, so each app has one current tag, set by the most recent mark from a current device. A binding only counts while the device that made it is current; the aza app binds every tag again, old and current, whenever a device stops being current, including a master after a handoff. |
+| `PUT tags/{identity}/{tag}` | a current device | binds a tag to an app and marks it current or old, or changes that. An app's current tag is the one most recently marked current by a device that is still current; its other tags are old. A binding only counts while the device that made it is current; the aza app binds every tag again, old and current, whenever a device stops being current, including a master after a handoff. |
 
 **Bodies.** Lists of changes, envelopes, profile records and key packages are CBOR arrays. `GET sync`, `GET records` and `GET inbox` return `{items, counter}`. `POST log` returns `{stored}`, the number of changes kept. `POST pairing` takes `{key, enc, label}` and returns `{url}`, and the reply is `{sealed}`. `PUT tags` takes `{app, current}`. `PUT registrations` takes the client's certificate. A blob is a CBOR byte string. An export is a map with `log`, `sync`, `envelopes`, `certificates`, `profiles`, `records`, `blobs` (`{hash, data}`), `tags` (`{tag, app, current, by}`), `registrations` (`{tag, certificate}`), `inbox` (`{box, item}`, `box` being a tag or `"requests"`) and `keypackages` (`{tag, client, package}`). An error is `{error}` with a message, under an HTTP status: 400 malformed, 401 `aza-auth` missing or invalid, 403 not allowed, 404 not found, 409 a version conflict or not the current secret, 413 over the node's limits.
 
-Requests that need permission carry an `aza-auth` header: the base64url encoding of a CBOR object with the identity ID, `by` (a device ID, or a client key fingerprint whose certificate the node already holds), `time` (Unix seconds), a random 16-byte `nonce` and `sig`. `sig` is `by`'s signature over the CBOR array `["aza auth v1", host, method, path with query (the full path, `/aza/v1/` included), time, nonce, hash of the body]`. The header is about 4.6 KB. The node accepts it only if `host` is its own, `time` is within 5 minutes of its clock, it hasn't seen this `nonce` in that time, and `by` has permission after reading the newest log it holds:
+Requests that need permission carry an `aza-auth` header: the base64url encoding of a CBOR object with the identity ID, `by` (a device ID, or a client key fingerprint whose certificate the node already holds), `time` (Unix seconds), a random 16-byte `nonce` and `sig`. `sig` is `by`'s signature over the CBOR array `["aza auth v1", host, method, path with query (the full path, `/aza/v1/` included), time, nonce, hash of the body]`. The header is about 4.6 KB. The node accepts it only if `host` is its own, `time` matches its clock (section 3), it hasn't seen this `nonce` in that time, and `by` has permission after reading the newest log it holds:
 
 - a device: it is current;
 - a client: at least one certificate the node holds for that client key passes all of these: its `identity` matches the path, its signing device is current, the client isn't revoked, it has the scope the request needs, and its `app` is the request's app. The request's app is the `{app}` in `sync` and `records` paths, and the app a tag is bound to in `inbox`, `keypackages` and `registrations` paths. For `envelopes`, `{holder}` must be the client's own fingerprint and the certificate needs `read` or `receive`. A revoked client can't make any request.
@@ -496,7 +502,7 @@ This repository implements everything above.
 
 | Crate | What it is |
 |---|---|
-| `crates/aza-core` | The Verus-verified core: deterministic CBOR and Ed25519's encoding rules (section 3), resolving and reading a change log (section 5.4), and endorsements with RFC 9162 Merkle trees (section 10). It takes no cryptographic decisions: callers pass in hashes, fingerprints and whether each signature is valid. |
+| `crates/aza-core` | The Verus-verified core: deterministic CBOR, Ed25519's encoding rules and names in paths (section 3), parsing, resolving and reading a change log and its heads (section 5), accepting certificates and records (sections 7 and 10), endorsements with RFC 9162 Merkle trees (section 10), what a node keeps and who may ask it what (section 11), and counting proof of work (section 12). It takes no cryptographic decisions: callers pass in hashes, fingerprints and whether each signature is valid. |
 | `crates/aza` | Cryptography, every protocol object and the checks readers make, and the client library: the aza app (`aza_app`), app clients (`client`), apps checking sign-ins (`app`), hosted-master providers (`provider`) and an HTTP client for nodes (`node`). |
 | `crates/aza-node` | The node: every request of section 11.1 over HTTP, stored in SQLite. |
 | `crates/aza-swift`, `swift/`, `Package.swift` | `AzaKit`, the client library for iOS and macOS apps: Swift bindings (UniFFI) built into an XCFramework by `scripts/build-swift.sh`. `AzaClient` is one client of one app, `AzaDevice` the aza app's side, `AzaPairing` a new device joining. Apps add this repository as a Swift package; `scripts/release-swift.sh <version>` releases it. |
@@ -517,25 +523,31 @@ cargo run -p aza-node -- --url https://node.example --listen 0.0.0.0:8080 --db a
 
 Every function in `aza-core` is checked for every input: no indexing out of bounds, no arithmetic overflow, no panics, and every loop and recursion terminates. Beyond that, each module is proven against a specification written to read like the sections above:
 
+- **Parsing a change, sections 5.1, 5.3 and 13** (`parse.rs`): which fields every change and each body type has, and when a change is unparseable, `Invalid` or `Future`, exactly as `spec_change` transcribes those sections. Encryption keys, handles and node URLs are checked outside the core and passed in.
 - **Reading a change log, section 5.4** (`spec.rs`, `log.rs`): for any log, `read` returns exactly what the spec defines: the master chain (with master conflicts), master changes, master removals, discarded changes, the reading order, every sign-out and revocation judged on its own, and the state after applying the log (current devices, handle, home node, current and announced secrets, unreadable logs). Lemmas prove the spec has one answer: only one reading order fits step 5's description and only one judgment fits step 4's.
 - **Ancestors** (`dag.rs`): computed exactly as the transitive `prev` relation, whatever order the changes arrive in. Changes on a cycle (which needs a SHA-256 collision) are exactly those outside the log proper.
 - **Reading order** (`order.rs`): every non-discarded change exactly once, each taken only once its non-discarded ancestors are, the smallest-hash ready change first.
 - **Resolving hashes** (`resolve.rs`): `prev`, `by`, `device` and `keep` become exactly the indices of the changes they name ("a change only counts as an ancestor if it is actually in the log"), and which key must have signed each change. The caller's sort orders are checked, not trusted.
 - **Endorsements, section 10** (`endorse.rs`): rules 3 and 4, deciding which changes may keep a record alive and whether its inclusion proofs satisfy them.
-- **Deterministic CBOR, section 3** (`cbor.rs`): `decode` returns a value only if it is canonical and its encoding is exactly the input, so every value has one byte form; UTF-8 is checked against RFC 3629's grammar.
+- **Deterministic CBOR, section 3** (`cbor.rs`): `decode` returns a value only if it is canonical and its encoding is exactly the input, so every value has one byte form, and it accepts the encoding of every canonical value nested at most 64 deep; UTF-8 is checked against RFC 3629's grammar.
+- **Shortest floats, section 3** (`float.rs`): a float's value is defined exactly from IEEE 754's fields, and a float is canonical only if it isn't NaN (other than half-precision 0x7e00) and no narrower width's encoding has the same value. The check uses integer arithmetic alone.
 - **Ed25519's extra rules, section 3** (`ed25519.rs`): `S` < L, canonical `R` and `A` (RFC 8032 section 5.1.3), and `A` not of small order.
-- **Merkle trees** (`merkle.rs`): `root` and `path` equal RFC 9162's `MTH` and `PATH`.
+- **What a node keeps, section 11** (`admit.rs`): a node limits a log only per signing device, keeps every master change and each device's first sign-out of each other device, and refuses changes that sign themselves without revealing a link's next key and additions that wouldn't be applied.
+- **Who may make each request, section 11.1** (`access.rs`): the table of the node API, from facts about whoever signed `aza-auth`.
+- **Certificates and records, sections 7 and 10** (`accept.rs`): checks 1 to 3, and when anyone accepts a public record, from facts about the log.
+- **Deterministic maps, section 3** (`sort.rs`): every map this software signs has its keys sorted by their encodings, each key once with its first value, so what it signs is in the one form readers accept.
+- **Names, section 3 and 7** (`names.rs`): hashes in paths are exactly 64 lowercase hex digits, an item name decodes only from the one percent-encoding `encode_name` makes, and app IDs follow their grammar.
+- **Heads and proof of work** (`heads.rs`): the changes a new change lists in `prev` are exactly those no other change lists, leaving out changes this software can't read and, after a theft, the disowned changes and everything descending from them; the work of a genesis change is exactly how many zero bits its Argon2id output starts with.
+- **Merkle trees** (`merkle.rs`): `root` and `path` equal RFC 9162's `MTH` and `PATH`, `verify` is section 2.1.3.2's algorithm, and every inclusion proof `path` makes verifies against `root`.
 
 Cryptography comes from formally verified implementations: SHA-256, HKDF, Ed25519 and X25519 from HACL*, and ML-DSA-65 and ML-KEM-768 (inside X-Wing) from libcrux. HPKE is built on them in `aza::crypto` and checked against the `hpke` crate.
 
 Still trusted:
 - the HACL* and libcrux proofs, which are in F*, not Verus
 - RustCrypto's AES-256-GCM and Argon2id (no verified Rust Argon2id exists)
-- the float shortest-form check in CBOR (`float.rs`)
 - the table of eight small-order points, computed from curve25519-dalek's torsion subgroup
-- everything outside `aza-core`: parsing objects into fields, the client library, and the node's HTTP and storage code
-
-Not yet proven: that the decoder accepts every canonical encoding (it is proven never to accept a non-canonical one), and that the inclusion proofs `path` makes always verify.
+- the checks outside the core that `parse.rs`, `accept.rs` and `access.rs` take as facts: FIPS 203's key check, the Public Suffix List, URL parsing, signature checks, and the code that gathers those facts
+- everything else outside `aza-core`: parsing objects other than changes, the client library, and the node's HTTP and storage code
 
 ### Implementation choices
 

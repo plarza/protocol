@@ -46,6 +46,16 @@ proof fn lemma_or_bit(a: u64, b: u64, j: u64)
         requires j < 64;
 }
 
+proof fn lemma_and_bit(a: u64, b: u64, j: u64)
+    requires
+        j < 64,
+    ensures
+        bit(a & b, j) == (bit(a, j) && bit(b, j)),
+{
+    assert(((a & b) >> j) & 1 == 1 <==> ((a >> j) & 1 == 1 && (b >> j) & 1 == 1)) by (bit_vector)
+        requires j < 64;
+}
+
 proof fn lemma_zero_bit(j: u64)
     requires
         j < 64,
@@ -442,6 +452,53 @@ impl Bits {
             assert(self.has(wit) && !old(self).has(wit));
         }
         changed
+    }
+
+    /// Whether the two sets share a member.
+    pub fn intersects(&self, other: &Bits) -> (r: bool)
+        requires
+            other.words.len() == self.words.len(),
+        ensures
+            r == exists|j: nat| self.has(j) && #[trigger] other.has(j),
+    {
+        let mut k: usize = 0;
+        while k < self.words.len()
+            invariant
+                k <= self.words.len(),
+                other.words.len() == self.words.len(),
+                forall|j: nat| j / 64 < k ==> !(self.has(j) && #[trigger] other.has(j)),
+            decreases self.words.len() - k,
+        {
+            let w = self.words[k] & other.words[k];
+            if w != 0 {
+                proof {
+                    let b = lemma_find_bit(w, 0);
+                    lemma_and_bit(self.words[k as int], other.words[k as int], b);
+                    let j = (k * 64 + b) as nat;
+                    assert(j / 64 == k && j % 64 == b) by (nonlinear_arith)
+                        requires j == k * 64 + b, b < 64;
+                    assert(self.has(j) && other.has(j));
+                }
+                return true;
+            }
+            proof {
+                assert forall|j: nat| j / 64 < k + 1 implies !(self.has(j) && #[trigger] other.has(j)) by {
+                    if j / 64 == k {
+                        lemma_and_bit(self.words[k as int], other.words[k as int], (j % 64) as u64);
+                        lemma_zero_bit((j % 64) as u64);
+                    }
+                }
+            }
+            k = k + 1;
+        }
+        proof {
+            assert forall|j: nat| !(self.has(j) && #[trigger] other.has(j)) by {
+                if j / 64 >= k {
+                    assert(!self.has(j));
+                }
+            }
+        }
+        false
     }
 
     pub fn clone_bits(&self) -> (r: Bits)

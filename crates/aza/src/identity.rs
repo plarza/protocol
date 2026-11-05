@@ -26,7 +26,8 @@ pub struct Identity {
     changes: Vec<Change>,
     by_hash: HashMap<Hash, usize>,
     by_device: HashMap<Hash, usize>,
-    reading: std::sync::Arc<core::Reading>,
+    /// The log as the verified core reads it, and what it worked out.
+    core: std::sync::Arc<(Vec<core::Change>, core::Reading)>,
 }
 
 impl std::fmt::Debug for Identity {
@@ -41,25 +42,35 @@ impl Identity {
         Identity::read_with_work(id, changes, MIN_WORK)
     }
 
-    /// Reads a log, requiring at least `min_work` (a node's admission price).
+    /// Reads a log, requiring at least `min_work` (a node's admission price). Copies of one
+    /// change that differ only in `sig` are one change, and the reading keeps a copy whose
+    /// signature is valid.
     pub fn read_with_work(id: Hash, changes: impl IntoIterator<Item = Change>, min_work: u32) -> Result<Identity> {
         let mut list: Vec<Change> = Vec::new();
-        let mut by_hash = HashMap::new();
+        let mut copies: Vec<Vec<Change>> = Vec::new();
+        let mut by_hash: HashMap<Hash, usize> = HashMap::new();
         for c in changes {
             let ours = match c.body {
                 Body::Genesis { .. } => c.hash() == id,
                 _ => c.identity == Some(id),
             };
-            if ours && !by_hash.contains_key(&c.hash()) {
-                by_hash.insert(c.hash(), list.len());
-                list.push(c);
+            if !ours {
+                continue;
+            }
+            match by_hash.get(&c.hash()) {
+                Some(&i) => copies[i].push(c),
+                None => {
+                    by_hash.insert(c.hash(), list.len());
+                    list.push(c);
+                    copies.push(Vec::new());
+                }
             }
         }
         let genesis = *by_hash.get(&id).ok_or(Error::NoIdentity)?;
         let mut by_device: HashMap<Hash, usize> = HashMap::new();
         for (i, c) in list.iter().enumerate() {
             if c.device_key().is_some() {
-                by_device.entry(c.device_id()).or_insert(i);
+                by_device.entry(c.hash()).or_insert(i);
             }
         }
         // The verified core resolves every hash to an index and names the key each change must be
@@ -69,7 +80,7 @@ impl Identity {
             .iter()
             .map(|c| Raw {
                 hash: c.hash(),
-                id: c.device_id(),
+                id: c.hash(),
                 prev: c.prev.clone(),
                 by: c.by,
                 body: match &c.body {
@@ -96,7 +107,7 @@ impl Identity {
         let mut sorted_hash: Vec<usize> = (0..list.len()).collect();
         sorted_hash.sort_by_key(|&i| list[i].hash());
         let mut sorted_id: Vec<usize> = (0..list.len()).filter(|&i| list[i].device_key().is_some()).collect();
-        sorted_id.sort_by_key(|&i| (list[i].device_id(), i));
+        sorted_id.sort_by_key(|&i| (list[i].hash(), i));
         let (mut input, signers) =
             aza_core::resolve::resolve(&raws, &sorted_hash, &sorted_id).ok_or(Error::NoIdentity)?;
         for (i, signer) in signers.iter().enumerate() {
@@ -105,10 +116,20 @@ impl Identity {
                 Signer::Device(j) => list[*j].device_key(),
                 Signer::Nobody => None,
             };
-            input[i].sig_ok = key.is_some_and(|k| list[i].verify_with(k));
+            let Some(key) = key.map(<[u8]>::to_vec) else { continue };
+            if !list[i].verify_with(&key)
+                && let Some(valid) = copies[i].iter().find(|c| c.verify_with(&key))
+            {
+                list[i] = valid.clone();
+            }
+            input[i].sig_ok = list[i].verify_with(&key);
         }
         let reading = core::read(&input, genesis).ok_or(Error::NoIdentity)?;
-        Ok(Identity { id, changes: list, by_hash, by_device, reading: std::sync::Arc::new(reading) })
+        Ok(Identity { id, changes: list, by_hash, by_device, core: std::sync::Arc::new((input, reading)) })
+    }
+
+    fn reading(&self) -> &core::Reading {
+        &self.core.1
     }
 
     pub fn changes(&self) -> &[Change] {
@@ -125,7 +146,7 @@ impl Identity {
 
     /// The log can be used for everything, not only for signing sign-outs and removals.
     pub fn readable(&self) -> bool {
-        !self.reading.unreadable
+        !self.reading().unreadable
     }
 
     pub fn require_readable(&self) -> Result<()> {
@@ -133,35 +154,35 @@ impl Identity {
     }
 
     pub fn has_master_conflict(&self) -> bool {
-        self.reading.conflict
+        self.reading().conflict
     }
 
     pub fn is_discarded(&self, hash: &Hash) -> bool {
-        self.index(hash).is_some_and(|i| self.reading.discarded[i])
+        self.index(hash).is_some_and(|i| self.reading().discarded[i])
     }
 
     pub fn is_applied(&self, hash: &Hash) -> bool {
-        self.index(hash).is_some_and(|i| self.reading.applied[i])
+        self.index(hash).is_some_and(|i| self.reading().applied[i])
     }
 
     pub fn is_master_change(&self, hash: &Hash) -> bool {
-        self.index(hash).is_some_and(|i| self.reading.master_change[i])
+        self.index(hash).is_some_and(|i| self.reading().master_change[i])
     }
 
     /// Changes in reading order (discarded changes left out).
     pub fn reading_order(&self) -> impl Iterator<Item = &Change> {
-        self.reading.order.iter().map(|&i| &self.changes[i])
+        self.reading().order.iter().map(|&i| &self.changes[i])
     }
 
     fn device_at(&self, i: usize) -> Option<Device> {
         let c = &self.changes[i];
         let (key, enc) = (c.device_key()?, c.device_enc()?);
-        let master = self.reading.link[i].is_some();
+        let master = self.reading().link[i].is_some();
         if !master && !matches!(c.body, Body::AddDevice { .. }) {
             return None;
         }
         Some(Device {
-            id: c.device_id(),
+            id: c.hash(),
             key: key.to_vec(),
             enc: enc.to_vec(),
             label: match &c.body {
@@ -169,7 +190,7 @@ impl Identity {
                 _ => None,
             },
             master,
-            current: self.reading.current[i],
+            current: self.reading().current[i],
         })
     }
 
@@ -198,10 +219,10 @@ impl Identity {
 
     /// The current master, unless the chain ended in a master conflict.
     pub fn master(&self) -> Option<Device> {
-        if self.reading.conflict {
+        if self.reading().conflict {
             return None;
         }
-        self.device_at(*self.reading.links.last()?)
+        self.device_at(*self.reading().links.last()?)
     }
 
     /// The signing key of a device, taken from the change that brought it in even if that
@@ -211,14 +232,14 @@ impl Identity {
     }
 
     pub fn handle(&self) -> Option<String> {
-        match &self.changes[self.reading.handle?].body {
+        match &self.changes[self.reading().handle?].body {
             Body::SetHandle { handle } => handle.clone(),
             _ => None,
         }
     }
 
     pub fn home(&self) -> Option<String> {
-        match &self.changes[self.reading.home?].body {
+        match &self.changes[self.reading().home?].body {
             Body::SetHome { node } => Some(node.clone()),
             _ => None,
         }
@@ -226,14 +247,14 @@ impl Identity {
 
     /// The name of the current data secret.
     pub fn current_secret(&self) -> Hash {
-        self.changes[self.reading.secret].hash()
+        self.changes[self.reading().secret].hash()
     }
 
     /// The `check` of a data secret readers may open: the first one or one an applied
     /// `new-secret` change announced.
     pub fn secret_check(&self, name: &Hash) -> Option<Hash> {
         let i = self.index(name)?;
-        if !self.reading.announced[i] {
+        if !self.reading().announced[i] {
             return None;
         }
         match &self.changes[i].body {
@@ -244,13 +265,13 @@ impl Identity {
 
     /// Every data secret readers may open, oldest first in reading order.
     pub fn announced_secrets(&self) -> Vec<Hash> {
-        self.reading.order.iter().filter(|&&i| self.reading.announced[i]).map(|&i| self.changes[i].hash()).collect()
+        self.reading().order.iter().filter(|&&i| self.reading().announced[i]).map(|&i| self.changes[i].hash()).collect()
     }
 
     /// The log has a revocation of this client key fingerprint.
     pub fn is_revoked(&self, client: &Hash) -> bool {
         self.changes.iter().enumerate().any(|(i, c)| {
-            self.reading.revocation[i] && matches!(&c.body, Body::RevokeClient { client: f } if f == client)
+            self.reading().revocation[i] && matches!(&c.body, Body::RevokeClient { client: f } if f == client)
         })
     }
 
@@ -261,73 +282,43 @@ impl Identity {
     }
 
     /// Heads of the log once `disowned` changes and everything descending from them are left
-    /// out, for a handoff after a theft (section 4).
+    /// out, for a handoff after a theft (section 4). Decided by the verified `aza_core::heads`.
     pub fn heads_excluding(&self, disowned: &[Hash]) -> Vec<Hash> {
-        let n = self.changes.len();
-        let mut tainted = vec![false; n];
-        for &i in self.topological().iter() {
-            let c = &self.changes[i];
-            tainted[i] = disowned.contains(&c.hash())
-                || matches!(c.body, Body::Future)
-                || c.prev.iter().any(|p| self.index(p).is_some_and(|j| tainted[j]));
-        }
-        let mut referenced = vec![false; n];
-        for (i, c) in self.changes.iter().enumerate() {
-            if !tainted[i] {
-                for p in &c.prev {
-                    if let Some(j) = self.index(p) {
-                        referenced[j] = true;
-                    }
-                }
-            }
-        }
+        let excluded: Vec<bool> =
+            self.changes.iter().map(|c| matches!(c.body, Body::Future) || disowned.contains(&c.hash())).collect();
+        let (input, reading) = &*self.core;
+        let flags = aza_core::heads::heads(input, &reading.anc, &excluded);
         let mut heads: Vec<Hash> =
-            (0..n).filter(|&i| !tainted[i] && !referenced[i]).map(|i| self.changes[i].hash()).collect();
+            (0..self.changes.len()).filter(|&i| flags[i]).map(|i| self.changes[i].hash()).collect();
         heads.sort();
         heads
     }
 
-    fn topological(&self) -> Vec<usize> {
-        let n = self.changes.len();
-        let mut done = vec![false; n];
-        let mut out = Vec::with_capacity(n);
-        fn visit(id: &Identity, i: usize, done: &mut [bool], out: &mut Vec<usize>, depth: usize) {
-            if done[i] || depth > id.changes.len() {
-                return;
-            }
-            done[i] = true;
-            for p in &id.changes[i].prev {
-                if let Some(j) = id.index(p) {
-                    visit(id, j, done, out, depth + 1);
-                }
-            }
-            out.push(i);
-        }
-        for i in 0..n {
-            visit(self, i, &mut done, &mut out, 0);
-        }
-        out
+    /// Which of the `fresh` changes a node keeps, given the ones it holds already (section 11,
+    /// decided by the verified `aza_core::admit`).
+    pub fn admit(&self, held: &std::collections::HashSet<Hash>, fresh: &std::collections::HashSet<Hash>) -> Vec<Hash> {
+        let (input, reading) = &*self.core;
+        let flags = |set: &std::collections::HashSet<Hash>| -> Vec<bool> {
+            self.changes.iter().map(|c| set.contains(&c.hash())).collect()
+        };
+        let kept = aza_core::admit::admit(
+            input,
+            &reading.links,
+            &reading.master_change,
+            &reading.applied,
+            &flags(held),
+            &flags(fresh),
+        );
+        (0..self.changes.len())
+            .filter(|&i| kept[i] && fresh.contains(&self.changes[i].hash()))
+            .map(|i| self.changes[i].hash())
+            .collect()
     }
 
     /// Whether change `a` is an ancestor of change `b`.
     pub fn is_ancestor(&self, a: &Hash, b: &Hash) -> bool {
-        let (Some(_), Some(bi)) = (self.index(a), self.index(b)) else { return false };
-        let mut stack = vec![bi];
-        let mut seen = vec![false; self.changes.len()];
-        while let Some(i) = stack.pop() {
-            for p in &self.changes[i].prev {
-                if let Some(j) = self.index(p)
-                    && !seen[j]
-                {
-                    if self.changes[j].hash() == *a {
-                        return true;
-                    }
-                    seen[j] = true;
-                    stack.push(j);
-                }
-            }
-        }
-        false
+        let (Some(ai), Some(bi)) = (self.index(a), self.index(b)) else { return false };
+        self.reading().anc[bi].get(ai)
     }
 
     /// The `add-device` change of a device and every change it signed, newest last.
@@ -340,7 +331,7 @@ impl Identity {
     /// whether the record has an inclusion proof for an endorsing change against its root.
     pub fn endorsement_holds(&self, device: &Hash, proved: impl Fn(&Hash, &Hash) -> bool) -> bool {
         let Some(&d) = self.by_device.get(device) else { return false };
-        let endorsing = aza_core::endorse::endorsing(&self.reading, d);
+        let endorsing = aza_core::endorse::endorsing(self.reading(), d);
         let proven: Vec<bool> = self
             .changes
             .iter()
@@ -357,25 +348,25 @@ impl Identity {
     /// Sign-outs that count, as (sign-out change, signed-out device).
     pub fn sign_outs(&self) -> Vec<(Hash, Hash)> {
         (0..self.changes.len())
-            .filter_map(|i| self.reading.sign_out[i].map(|d| (self.changes[i].hash(), self.changes[d].device_id())))
+            .filter_map(|i| self.reading().sign_out[i].map(|d| (self.changes[i].hash(), self.changes[d].hash())))
             .collect()
     }
 
     /// Master removals, as (removal change, removed device).
     pub fn removals(&self) -> Vec<(Hash, Hash)> {
         (0..self.changes.len())
-            .filter_map(|i| self.reading.removal[i].map(|d| (self.changes[i].hash(), self.changes[d].device_id())))
+            .filter_map(|i| self.reading().removal[i].map(|d| (self.changes[i].hash(), self.changes[d].hash())))
             .collect()
     }
 
     /// The device IDs of every link of the master chain, oldest first.
     pub fn master_chain(&self) -> Vec<Hash> {
-        self.reading.links.iter().map(|&i| self.changes[i].device_id()).collect()
+        self.reading().links.iter().map(|&i| self.changes[i].hash()).collect()
     }
 
     /// The `next` of the current master's link, if there is a master.
     pub fn master_next(&self) -> Option<Hash> {
-        let i = *self.reading.links.last()?;
+        let i = *self.reading().links.last()?;
         match &self.changes[i].body {
             Body::Genesis { next, .. } | Body::SetMaster { next, .. } => Some(*next),
             _ => None,

@@ -5,10 +5,7 @@ use crate::error::{Error, Result};
 /// Whether `s` is a registrable domain, like `sidny.me` or `example.com.au`, but never a
 /// subdomain like `blog.sidny.me`.
 pub fn is_handle(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
-        && crate::certificate::is_app_id(s)
-        && psl::domain_str(s) == Some(s)
+    crate::certificate::is_app_id(s) && psl::domain_str(s) == Some(s)
 }
 
 /// The TXT record a handle's owner adds at `_aza.<handle>`.

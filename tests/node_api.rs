@@ -499,3 +499,39 @@ async fn a_full_node_refuses_new_data_and_keeps_serving_reads() {
     assert!(a.profile().await.unwrap().is_some());
     assert_eq!(reqwest::get(format!("{node}/healthz")).await.unwrap().status().as_u16(), 200);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_drops_records_whose_signature_fails() {
+    let old = aza_tests::node().await;
+    let new = aza_tests::node().await;
+    let mut a = AzaApp::create(&old, "A", 6).await.unwrap();
+    let mut posts = client(&mut a, "plarza.com", &[PUBLISH]).await;
+    posts.publish("posts/real", Some("signed".into())).await.unwrap();
+    let signer = Signer { identity: a.identity, by: a.device().id, key: a.device().key.clone() };
+    let mut export = NodeClient::new(&old).unwrap().get_export(&a.identity, &signer).await.unwrap();
+    // A forged version: the real record's signature over different content.
+    let real = export.records[0].clone();
+    let forged = aza::record::Record::from_value(real.to_value().with("name", "posts/forged".into())).unwrap();
+    export.records.push(forged);
+    let target = NodeClient::new(&new).unwrap();
+    target.post_import(&a.identity, &export, &signer).await.unwrap();
+    let stored = target.get_records(&a.identity, "plarza.com", 0).await.unwrap().items;
+    assert_eq!(stored.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["posts/real"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readers_keep_a_version_per_app_and_name() {
+    let node = aza_tests::node().await;
+    let mut a = AzaApp::create(&node, "A", 6).await.unwrap();
+    let mut plarza = client(&mut a, "plarza.com", &[PUBLISH]).await;
+    let mut other = client(&mut a, "other.example", &[PUBLISH]).await;
+    plarza.publish("about", Some("on plarza".into())).await.unwrap();
+    other.publish("about", Some("elsewhere".into())).await.unwrap();
+    let mut records = plarza.records().await.unwrap();
+    records.extend(other.records().await.unwrap());
+    let log = plarza.refresh().await.unwrap().clone();
+    let current = aza::record::current_versions(&records, &log);
+    let mut apps: Vec<&str> = current.iter().map(|r| r.app.as_str()).collect();
+    apps.sort();
+    assert_eq!(apps, ["other.example", "plarza.com"]);
+}

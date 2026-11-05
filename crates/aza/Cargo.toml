@@ -24,7 +24,6 @@ libcrux-ml-dsa = "0.0.11"
 libcrux-ml-kem = "0.0.11"
 libcrux-sha2 = "0.0.9"
 libcrux-traits = "0.0.9"
-percent-encoding = "2"
 psl = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 serde_json = "1"

@@ -294,7 +294,7 @@ impl Client {
         let page = self.node()?.get_sync(&id, &self.app, 0, &self.signer()?).await?;
         self.sync_counter = page.counter;
         let mut out = Vec::new();
-        for item in crate::aza_app::latest(page.items) {
+        for item in SyncItem::latest(page.items) {
             let key = self.app_key_for(&item.secret).await?;
             out.push(Item { name: item.name.clone(), version: item.version, data: item.open(&key)? });
         }
