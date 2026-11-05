@@ -24,7 +24,7 @@ sed -i '' -E \
   -e "s#checksum: \"[0-9a-f]{64}\"#checksum: \"$CHECKSUM\"#" \
   Package.swift
 git add Package.swift swift/Sources/AzaKit/AzaKit.swift
-git commit -q -m "AzaKit $VERSION"
+git commit -q -m "chore(swift): release AzaKit $VERSION"
 git tag $VERSION
 for remote in $(git remote); do git push -q $remote HEAD $VERSION; done
 gh release create $VERSION $WORK/$ZIP --repo plarza/protocol --title "AzaKit $VERSION" --notes "AzaKit $VERSION for iOS and macOS."
